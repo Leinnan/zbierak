@@ -18,10 +18,13 @@ test:
 clippy:
     cargo clippy --workspace --all-targets -- -D warnings
 
+docs-check:
+    cargo clippy --package zbierak --all-targets --features docs -- -D warnings
+
 run:
     ZBIERAK_LISTEN_ADDR="${ZBIERAK_DEV_LISTEN_ADDR:-127.0.0.1:3000}" ZBIERAK_DATABASE_URL="${ZBIERAK_DEV_DATABASE_URL:-sqlite://data/zbierak.db}" ZBIERAK_STATIC_DIR=src/static ZBIERAK_TEMPLATE_DIR=src/templates cargo run --locked --package zbierak
 
-verify: fmt-check check test clippy
+verify: fmt-check check test clippy docs-check
 
 docker-build:
     docker compose build

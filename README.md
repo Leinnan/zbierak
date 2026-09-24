@@ -142,8 +142,29 @@ A new event returns HTTP `202 Accepted`:
 
 `event_id` is idempotent within a project. Repeating it returns HTTP 202 with the
 original issue and fingerprint plus `"duplicate":true`; it does not increment
-the issue or enqueue another notification. API errors are HTML responses rather
-than the protocol crate's JSON error type.
+the issue or enqueue another notification. API errors use the protocol crate's
+JSON error shape (`{"code":"...","message":"...","field":"..."}`) with status
+`400` for malformed requests, `401` for a missing or invalid ingest key, and
+`422` when the event fails protocol validation. The operator UI continues to
+return HTML errors.
+
+## API Documentation
+
+The versioned HTTP API is described by an OpenAPI 3.1 document. Documentation
+tooling is not part of release builds; enable the `docs` Cargo feature for local
+use:
+
+```sh
+cargo run --features docs
+```
+
+The Scalar UI is served at `/scalar` and the raw document at
+`/api-docs/openapi.json`. Scalar is loaded from the bundle vendored under
+`src/docs/scalar` and embedded in the binary only for `docs` builds; its default
+webfonts are disabled, so the page makes no third-party browser requests. These
+routes intentionally use a relaxed Content-Security-Policy and are
+unauthenticated, so keep them on loopback or behind a reverse proxy that
+restricts access in production.
 
 ## Rust SDK
 
@@ -211,10 +232,13 @@ Run `just` to list all recipes. `just docker-up` builds and starts the container
 ## Local Tabler Policy
 
 The UI serves pinned Tabler 1.4.0 and htmx 2.0.7 files from
-`src/static/vendor`; templates do not load a CDN or remote font service. Keep
-frontend assets local and version-pinned. Update them deliberately and maintain
-`src/static/THIRD_PARTY_NOTICES` with the distributed licenses. This preserves
-offline operation and avoids adding third-party browser requests.
+`src/static/vendor`; templates do not load a CDN or remote font service. The
+optional API documentation UI likewise serves a pinned Scalar 1.72.0 bundle from
+`src/docs/scalar` (embedded only in `docs` builds) with its default webfonts
+disabled. Keep frontend assets local and version-pinned. Update them
+deliberately and maintain `src/static/THIRD_PARTY_NOTICES` with the distributed
+licenses. This preserves offline operation and avoids adding third-party browser
+requests.
 
 ## Security
 

@@ -1,4 +1,8 @@
-use std::{env, net::SocketAddr, path::PathBuf};
+use std::{
+    env,
+    net::SocketAddr,
+    path::{Path, PathBuf},
+};
 
 use crate::{AppError, AppResult};
 
@@ -18,8 +22,10 @@ impl Config {
             .unwrap_or_else(|| "127.0.0.1:3000".into())
             .parse()
             .map_err(|e| AppError::Config(format!("invalid ZBIERAK_LISTEN_ADDR: {e}")))?;
-        let database_url = preferred_env("ZBIERAK_DATABASE_URL", "DATABASE_URL")
-            .unwrap_or_else(|| "sqlite://data/zbierak.db".into());
+        let database_url = match preferred_env("ZBIERAK_DATABASE_URL", "DATABASE_URL") {
+            Some(url) => normalize_database_url(url),
+            None => default_database_url(),
+        };
         if !database_url.starts_with("sqlite:") {
             return Err(AppError::Config(
                 "ZBIERAK_DATABASE_URL must be a SQLite URL".into(),
@@ -40,18 +46,46 @@ impl Config {
             database_url,
             cookie_secure,
             session_days,
-            static_dir: env::var("ZBIERAK_STATIC_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| asset_dir("static")),
-            template_dir: env::var("ZBIERAK_TEMPLATE_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|_| asset_dir("templates")),
+            static_dir: resolve_asset_dir("ZBIERAK_STATIC_DIR", "static"),
+            template_dir: resolve_asset_dir("ZBIERAK_TEMPLATE_DIR", "templates"),
         })
     }
 }
 
 fn preferred_env(primary: &str, legacy: &str) -> Option<String> {
     env::var(primary).ok().or_else(|| env::var(legacy).ok())
+}
+
+fn default_database_url() -> String {
+    if Path::new("/data").is_dir() {
+        "sqlite:///data/zbierak.db?mode=rwc".into()
+    } else {
+        "sqlite://data/zbierak.db".into()
+    }
+}
+
+fn normalize_database_url(url: String) -> String {
+    normalize_database_url_for(url, Path::new("/data").is_dir())
+}
+
+fn normalize_database_url_for(url: String, data_dir_present: bool) -> String {
+    // The container .env points SQLite at the /data volume. Source runs on hosts
+    // without that directory (for example macOS, whose root filesystem is
+    // read-only) must not fail trying to create it, so fall back to ./data.
+    match url.strip_prefix("sqlite:///data/") {
+        Some(rest) if !data_dir_present => format!("sqlite://data/{rest}"),
+        _ => url,
+    }
+}
+
+fn resolve_asset_dir(variable: &str, name: &str) -> PathBuf {
+    if let Ok(value) = env::var(variable) {
+        let path = PathBuf::from(value);
+        if path.is_dir() {
+            return path;
+        }
+    }
+    asset_dir(name)
 }
 
 fn asset_dir(name: &str) -> PathBuf {
@@ -72,5 +106,37 @@ fn parse_bool(name: &str, default: bool) -> AppResult<bool> {
         },
         Err(env::VarError::NotPresent) => Ok(default),
         Err(error) => Err(AppError::Config(format!("invalid {name}: {error}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_database_url_for;
+
+    #[test]
+    fn container_data_url_falls_back_without_data_dir() {
+        assert_eq!(
+            normalize_database_url_for("sqlite:///data/zbierak.db?mode=rwc".into(), false),
+            "sqlite://data/zbierak.db?mode=rwc"
+        );
+    }
+
+    #[test]
+    fn container_data_url_is_kept_when_data_dir_exists() {
+        assert_eq!(
+            normalize_database_url_for("sqlite:///data/zbierak.db?mode=rwc".into(), true),
+            "sqlite:///data/zbierak.db?mode=rwc"
+        );
+    }
+
+    #[test]
+    fn unrelated_database_urls_are_unchanged() {
+        for url in [
+            "sqlite::memory:",
+            "sqlite://data/zbierak.db",
+            "sqlite:///tmp/zbierak.db",
+        ] {
+            assert_eq!(normalize_database_url_for(url.into(), false), url);
+        }
     }
 }

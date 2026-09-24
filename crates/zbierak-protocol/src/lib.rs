@@ -12,10 +12,14 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[cfg(feature = "schema")]
+use utoipa::ToSchema;
+
 /// The newest event schema understood by this crate.
 pub const PROTOCOL_VERSION: u16 = 1;
 
 /// A complete event accepted by the ingestion API.
+#[cfg_attr(feature = "schema", derive(ToSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Event {
     /// Wire schema version.
@@ -148,6 +152,7 @@ impl Default for Event {
 }
 
 /// Structured error details.
+#[cfg_attr(feature = "schema", derive(ToSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorInfo {
     /// Language or application error type, such as `std::io::Error`.
@@ -162,6 +167,7 @@ pub struct ErrorInfo {
 }
 
 /// Severity used for events and breadcrumbs.
+#[cfg_attr(feature = "schema", derive(ToSchema))]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
@@ -179,6 +185,7 @@ pub enum Severity {
 }
 
 /// A single call-site in a stack trace.
+#[cfg_attr(feature = "schema", derive(ToSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StackFrame {
     /// Source file name or path.
@@ -202,6 +209,7 @@ pub struct StackFrame {
 }
 
 /// A point-in-time diagnostic trail entry.
+#[cfg_attr(feature = "schema", derive(ToSchema))]
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Breadcrumb {
     /// UTC timestamp in RFC 3339 form.
@@ -233,6 +241,7 @@ impl Breadcrumb {
 }
 
 /// User identity and optional profile data.
+#[cfg_attr(feature = "schema", derive(ToSchema))]
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct User {
     /// Stable application user identifier.
@@ -253,6 +262,7 @@ pub struct User {
 }
 
 /// Successful ingestion response.
+#[cfg_attr(feature = "schema", derive(ToSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestResponse {
     /// Accepted event identifier.
@@ -262,6 +272,7 @@ pub struct IngestResponse {
 }
 
 /// Ingestion disposition.
+#[cfg_attr(feature = "schema", derive(ToSchema))]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IngestStatus {
@@ -272,6 +283,7 @@ pub enum IngestStatus {
 }
 
 /// Machine-readable API error body.
+#[cfg_attr(feature = "schema", derive(ToSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ApiErrorResponse {
     /// Stable machine-readable error code.

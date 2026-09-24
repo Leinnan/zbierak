@@ -17,9 +17,13 @@ use uuid::Uuid;
 
 use crate::{
     AppError, AppResult, AppState,
+    api_error::ApiError,
     auth::{self, User},
     fingerprint::event_fingerprint,
 };
+
+#[cfg(feature = "docs")]
+use crate::api_error::ErrorResponse;
 
 #[derive(Deserialize)]
 pub struct BootstrapForm {
@@ -846,6 +850,7 @@ pub async fn delete_webhook(
     Ok(Redirect::to("/settings"))
 }
 
+#[cfg_attr(feature = "docs", derive(utoipa::ToSchema))]
 #[derive(Serialize)]
 pub struct IngestResponse {
     id: String,
@@ -854,14 +859,29 @@ pub struct IngestResponse {
     duplicate: bool,
 }
 
+#[cfg_attr(feature = "docs", utoipa::path(
+    post,
+    path = "/api/v1/projects/{slug}/events",
+    tag = "events",
+    operation_id = "ingestEvent",
+    params(("slug" = String, Path, description = "Project slug")),
+    request_body = zbierak_protocol::Event,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 202, description = "Event accepted, or an idempotent duplicate", body = IngestResponse),
+        (status = 400, description = "Malformed request body", body = ErrorResponse),
+        (status = 401, description = "Missing or invalid ingest key", body = ErrorResponse),
+        (status = 422, description = "Event failed protocol validation", body = ErrorResponse),
+    )
+))]
 pub async fn ingest(
     State(state): State<AppState>,
     AxumPath(slug): AxumPath<String>,
     headers: HeaderMap,
     body: Bytes,
-) -> AppResult<impl IntoResponse> {
+) -> Result<impl IntoResponse, ApiError> {
     if body.len() > 1_048_576 {
-        return Err(AppError::BadRequest("event exceeds 1 MiB".into()));
+        return Err(AppError::BadRequest("event exceeds 1 MiB".into()).into());
     }
     let bearer = auth::bearer(&headers)?;
     let key_hash = auth::token_hash(bearer);
@@ -874,13 +894,14 @@ pub async fn ingest(
     .fetch_optional(&state.db)
     .await?;
     let Some((key_id, project_id)) = key else {
-        return Err(AppError::Unauthorized);
+        return Err(AppError::Unauthorized.into());
     };
     let event: zbierak_protocol::Event = serde_json::from_slice(&body)
         .map_err(|error| AppError::BadRequest(format!("invalid event: {error}")))?;
-    event
-        .validate()
-        .map_err(|error| AppError::BadRequest(format!("invalid event: {error}")))?;
+    event.validate().map_err(|error| AppError::Unprocessable {
+        field: Some(error.field().to_owned()),
+        message: error.message().to_owned(),
+    })?;
     let value: Value = serde_json::from_slice(&body)
         .map_err(|error| AppError::BadRequest(format!("invalid JSON: {error}")))?;
     let fingerprint = event_fingerprint(&value);
@@ -1011,11 +1032,30 @@ pub async fn ingest(
     ))
 }
 
+#[cfg_attr(feature = "docs", utoipa::path(
+    get,
+    path = "/health",
+    tag = "system",
+    operation_id = "health",
+    responses(
+        (status = 200, description = "Process is alive", body = String, content_type = "text/plain")
+    )
+))]
 pub async fn health() -> &'static str {
     "ok"
 }
 
-pub async fn ready(State(state): State<AppState>) -> AppResult<&'static str> {
+#[cfg_attr(feature = "docs", utoipa::path(
+    get,
+    path = "/ready",
+    tag = "system",
+    operation_id = "ready",
+    responses(
+        (status = 200, description = "Database is reachable", body = String, content_type = "text/plain"),
+        (status = 500, description = "Database check failed", body = ErrorResponse)
+    )
+))]
+pub async fn ready(State(state): State<AppState>) -> Result<&'static str, ApiError> {
     sqlx::query_scalar::<_, i64>("SELECT 1")
         .fetch_one(&state.db)
         .await?;

@@ -1,9 +1,12 @@
+mod api_error;
 mod auth;
 mod config;
 mod db;
 mod error;
 mod fingerprint;
 mod handlers;
+#[cfg(feature = "docs")]
+mod openapi;
 mod outbox;
 
 use std::{sync::Arc, time::Duration};
@@ -33,7 +36,7 @@ pub struct AppState {
 }
 
 pub fn router(state: AppState) -> Router {
-    Router::new()
+    let app = Router::new()
         .route("/", get(handlers::home))
         .route(
             "/bootstrap",
@@ -80,7 +83,14 @@ pub fn router(state: AppState) -> Router {
         .route("/static/{*path}", get(handlers::static_asset))
         .layer(middleware::from_fn(security_headers))
         .layer(CookieManagerLayer::new())
-        .with_state(state)
+        .with_state(state);
+
+    // Merged after the security layer so the documentation routes receive their
+    // own, relaxed CSP instead of the application-wide policy.
+    #[cfg(feature = "docs")]
+    let app = app.merge(openapi::docs_router());
+
+    app
 }
 
 pub async fn run() -> AppResult<()> {
@@ -298,6 +308,69 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn ingest_validation_failures_return_json_422() {
+        let db = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .unwrap();
+        sqlx::migrate!().run(&db).await.unwrap();
+        sqlx::query(
+            "INSERT INTO users (id, email, display_name, password_hash)
+             VALUES (1, 'owner@example.com', 'Owner', 'unused')",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO projects (id, slug, name, created_by) VALUES (1, 'demo', 'Demo', 1)",
+        )
+        .execute(&db)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO ingest_keys (project_id, name, key_prefix, key_hash, created_by)
+             VALUES (1, 'test', 'zbk_test', ?, 1)",
+        )
+        .bind(crate::auth::token_hash("zbk_test_key"))
+        .execute(&db)
+        .await
+        .unwrap();
+        let state = AppState {
+            config: Arc::new(Config {
+                bind: "127.0.0.1:0".parse().unwrap(),
+                database_url: "sqlite::memory:".into(),
+                cookie_secure: false,
+                session_days: 30,
+                static_dir: PathBuf::from("src/static"),
+                template_dir: PathBuf::from("src/templates"),
+            }),
+            db,
+            templates: Arc::new(tera::Tera::default()),
+            http: reqwest::Client::new(),
+        };
+        let app = router(state);
+        let invalid = r#"{"event_id":"evt-1","timestamp":"2026-09-24T12:00:00Z","message":""}"#;
+        let response = app
+            .oneshot(
+                Request::post("/api/v1/projects/demo/events")
+                    .header("authorization", "Bearer zbk_test_key")
+                    .header("content-type", "application/json")
+                    .body(Body::from(invalid))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        let body: serde_json::Value =
+            serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(body["code"], "validation_failed");
+        assert_eq!(body["field"], "message");
     }
 
     #[tokio::test]

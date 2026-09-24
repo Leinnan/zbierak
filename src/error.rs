@@ -17,6 +17,11 @@ pub enum AppError {
     NotFound,
     #[error("{0}")]
     BadRequest(String),
+    #[error("{message}")]
+    Unprocessable {
+        field: Option<String>,
+        message: String,
+    },
     #[error(transparent)]
     Database(#[from] sqlx::Error),
     #[error(transparent)]
@@ -36,6 +41,7 @@ impl IntoResponse for AppError {
             Self::Forbidden => (StatusCode::FORBIDDEN, self.to_string()),
             Self::NotFound => (StatusCode::NOT_FOUND, self.to_string()),
             Self::BadRequest(_) | Self::Config(_) => (StatusCode::BAD_REQUEST, self.to_string()),
+            Self::Unprocessable { .. } => (StatusCode::UNPROCESSABLE_ENTITY, self.to_string()),
             _ => {
                 tracing::error!(error = %self, "request failed");
                 (
