@@ -85,15 +85,17 @@ const SCALAR_JS: &[u8] = include_bytes!("docs/scalar/scalar.standalone.js");
 /// Scalar page that loads the locally served bundle and disables the default
 /// webfonts so no third-party requests are made.
 const SCALAR_HTML: &str = r#"<!doctype html>
-<html>
+<html lang="en">
 <head>
   <title>$title</title>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <meta name="color-scheme" content="light dark"/>
 </head>
 <body>
   <script id="api-reference" type="application/json"
-          data-configuration='{"withDefaultFonts":false}'>$spec</script>
+          data-configuration='{"withDefaultFonts":false,"hideDarkModeToggle":true}'>$spec</script>
+  <script src="/static/theme-init.js"></script>
   <script src="/scalar/scalar.standalone.js"></script>
 </body>
 </html>
@@ -135,4 +137,36 @@ async fn docs_security_headers(request: Request<Body>, next: Next) -> Response {
         ),
     );
     response
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{body::Body, http::Request};
+    use http_body_util::BodyExt;
+    use tower::ServiceExt;
+
+    use super::docs_router;
+
+    #[tokio::test]
+    async fn scalar_uses_the_shared_theme_before_mounting() {
+        let response = docs_router()
+            .oneshot(Request::get("/scalar").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = String::from_utf8(
+            response
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes()
+                .to_vec(),
+        )
+        .unwrap();
+
+        assert!(body.contains("\"hideDarkModeToggle\":true"));
+        let initializer = body.find("/static/theme-init.js").unwrap();
+        let scalar = body.find("/scalar/scalar.standalone.js").unwrap();
+        assert!(initializer < scalar);
+    }
 }

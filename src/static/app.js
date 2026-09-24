@@ -50,6 +50,14 @@
     });
   }
 
+  function syncThemeControls(root) {
+    if (!window.ZbierakTheme) return;
+    var preference = window.ZbierakTheme.get();
+    root.querySelectorAll("[data-theme-select]").forEach(function (select) {
+      select.value = preference;
+    });
+  }
+
   function showCopyFeedback(button) {
     var original = button.textContent;
     button.textContent = "Copied";
@@ -64,6 +72,7 @@
     prepareStackTraces(root);
     localizeTimes(root);
     formatJson(root);
+    syncThemeControls(root);
   }
 
   document.addEventListener("DOMContentLoaded", function () {
@@ -137,6 +146,15 @@
         });
       }
     });
+
+    document.addEventListener("change", function (event) {
+      var select = event.target.closest("[data-theme-select]");
+      if (select && window.ZbierakTheme) window.ZbierakTheme.set(select.value);
+    });
+  });
+
+  document.addEventListener("zbierak:themechange", function () {
+    syncThemeControls(document);
   });
 
   document.addEventListener("htmx:configRequest", function (event) {

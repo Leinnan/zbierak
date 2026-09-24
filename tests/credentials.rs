@@ -5,6 +5,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use http_body_util::BodyExt;
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use tower::ServiceExt;
 use zbierak::{AppState, Config, hash_password, router, token_hash, verify_password};
@@ -117,6 +118,37 @@ fn form(app: &Router, session: &str, csrf: &str, path: &str, extra: &str) -> Req
         .header("cookie", format!("zbierak_session={session}"))
         .body(Body::from(format!("csrf_token={csrf}{extra}")))
         .unwrap()
+}
+
+#[tokio::test]
+async fn settings_offer_browser_theme_preferences() {
+    let TestApp { app, db } = seeded_app().await;
+    let (session, _csrf) = login(&app, &db).await;
+    let response = app
+        .oneshot(
+            Request::get("/settings")
+                .header("cookie", format!("zbierak_session={session}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+
+    assert!(body.contains("data-theme-select"));
+    assert!(body.contains("<option value=\"system\">System</option>"));
+    assert!(body.contains("<option value=\"light\">Light</option>"));
+    assert!(body.contains("<option value=\"dark\">Dark</option>"));
 }
 
 #[tokio::test]

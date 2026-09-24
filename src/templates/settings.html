@@ -2,11 +2,26 @@
 {% import "fragments/ui.html" as ui %}
 {% block title %}Settings · {{ app_name | default(value="Zbierak") }}{% endblock title %}
 {% block content %}
-<header class="page-heading"><div><p class="eyebrow">Settings</p><h1>Settings</h1><p>Notification delivery and account security.</p></div></header>
+<header class="page-heading"><div><p class="eyebrow">Settings</p><h1>Settings</h1><p>Appearance, notification delivery, and account security.</p></div></header>
 
 <div class="settings-layout">
-  <nav class="settings-nav" aria-label="Settings sections"><a href="#endpoints">Endpoints</a><a href="#add-endpoint">Add endpoint</a><a href="#api-tokens">API tokens</a><a href="#account">Account</a></nav>
+  <nav class="settings-nav" aria-label="Settings sections"><a href="#appearance">Appearance</a><a href="#endpoints">Endpoints</a><a href="#add-endpoint">Add endpoint</a><a href="#api-tokens">API tokens</a><a href="#account">Account</a></nav>
   <div class="settings-content">
+    <section class="settings-section" id="appearance" aria-labelledby="appearance-title">
+      <div class="section-heading"><div><p class="eyebrow">Display</p><h2 id="appearance-title">Appearance</h2></div></div>
+      <article class="card settings-card">
+        <div class="card-header"><div><h3 class="card-title">Theme</h3><p>Use your device setting or keep Zbierak in a specific theme on this browser.</p></div></div>
+        <div class="card-body">
+          <label class="form-label" for="theme-preference">Color theme</label>
+          <select class="form-select settings-number" id="theme-preference" data-theme-select>
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+      </article>
+    </section>
+
     <section class="settings-section" id="endpoints" aria-labelledby="endpoints-title">
       <div class="section-heading"><div><p class="eyebrow">Destinations</p><h2 id="endpoints-title">Configured endpoints</h2></div><span>{{ notification_endpoints | default(value=[]) | length }}</span></div>
       <div class="endpoint-list">

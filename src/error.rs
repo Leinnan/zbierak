@@ -56,11 +56,36 @@ impl IntoResponse for AppError {
                 )
             }
         };
+        let code = status.as_u16();
+        let heading = status.canonical_reason().unwrap_or("Request failed");
         (
             status,
             Html(format!(
-                "<!doctype html><title>Error</title><h1>{status}</h1><p>{}</p>",
-                escape(&message)
+                r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>{code} · Zbierak</title>
+  <script src="/static/theme-init.js"></script>
+  <link rel="stylesheet" href="/static/vendor/tabler/tabler.min.css">
+  <link rel="stylesheet" href="/static/app.css?v=2">
+</head>
+<body>
+  <main id="main-content">
+    <section class="error-shell">
+      <div class="error-code" aria-hidden="true">{code}</div>
+      <p class="eyebrow">Request interrupted</p>
+      <h1>{heading}</h1>
+      <p>{message}</p>
+      <div class="error-actions"><a class="btn btn-primary" href="/">Return home</a><button class="btn btn-outline-secondary" type="button" data-history-back>Go back</button></div>
+    </section>
+  </main>
+  <script src="/static/app.js?v=2" defer></script>
+</body>
+</html>"#,
+                message = escape(&message)
             )),
         )
             .into_response()

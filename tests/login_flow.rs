@@ -5,6 +5,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
+use http_body_util::BodyExt;
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use tower::ServiceExt;
 use zbierak::{AppState, Config, hash_password, router};
@@ -63,6 +64,88 @@ async fn fresh_login_challenge(app: &Router) -> (String, String) {
     let (name, value) = name_value.split_once('=').unwrap();
     assert_eq!(name, "zbierak_login_csrf");
     (name.to_owned(), value.to_owned())
+}
+
+#[tokio::test]
+async fn theme_bootstrap_loads_before_application_styles() {
+    let (app, _db) = seeded_app().await;
+    let response = app
+        .oneshot(Request::get("/login").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+
+    let initializer = body.find("/static/theme-init.js").unwrap();
+    let stylesheet = body.find("/static/app.css?v=2").unwrap();
+    assert!(initializer < stylesheet);
+}
+
+#[tokio::test]
+async fn theme_initializer_is_served_as_javascript() {
+    let (app, _db) = seeded_app().await;
+    let response = app
+        .oneshot(
+            Request::get("/static/theme-init.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers().get("content-type").unwrap(),
+        "text/javascript; charset=utf-8"
+    );
+    let body = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(body.contains("prefers-color-scheme: dark"));
+    assert!(body.contains("zbierak-theme"));
+}
+
+#[tokio::test]
+async fn application_errors_use_the_shared_theme() {
+    let (app, _db) = seeded_app().await;
+    let response = app
+        .oneshot(
+            Request::get("/static/does-not-exist.css")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = String::from_utf8(
+        response
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+
+    assert!(body.contains("class=\"error-shell\""));
+    assert!(body.contains("/static/theme-init.js"));
 }
 
 fn login_body(csrf: &str, email: &str, password: &str) -> Body {
