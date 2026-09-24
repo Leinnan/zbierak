@@ -29,7 +29,22 @@
 </section>
 
 <section aria-labelledby="issues-title">
-  <div class="section-heading"><div><p class="eyebrow">Error stream</p><h2 id="issues-title">Issues</h2></div><span>Latest 100</span></div>
+  <div class="section-heading"><div><p class="eyebrow">Error stream</p><h2 id="issues-title">Issues</h2></div><span>{% if filter_tags | default(value=[]) | length > 0 %}Filtered · {{ issues | default(value=[]) | length }} shown{% else %}Latest 100{% endif %}</span></div>
+  <form class="card tag-filter" method="get" action="/projects/{{ project.slug }}" aria-label="Filter issues by tags">
+    <div class="tag-filter-field">
+      <label class="form-label" for="tag-filter-input">Filter by tags</label>
+      <input class="form-control" id="tag-filter-input" name="tag" list="project-tags" value="{{ filter_tags | default(value=[]) | join(sep=', ') }}" placeholder="env:prod, region:eu" autocomplete="off">
+      <datalist id="project-tags">
+        {% for available_tag in project_tags | default(value=[]) %}
+        <option value="{{ available_tag }}"></option>
+        {% endfor %}
+      </datalist>
+    </div>
+    <button class="btn btn-primary" type="submit">Apply</button>
+    {% if filter_tags | default(value=[]) | length > 0 %}
+    <a class="btn btn-outline-secondary" href="/projects/{{ project.slug }}">Clear</a>
+    {% endif %}
+  </form>
   {% include "fragments/issue_table.html" %}
 </section>
 

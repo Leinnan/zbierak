@@ -5,6 +5,7 @@
       <thead>
         <tr>
           <th>Issue</th>
+          <th>Tags</th>
           <th>Status</th>
           <th class="text-end">Events</th>
           <th>Last seen</th>
@@ -20,6 +21,15 @@
               <span>First seen <time class="js-local-time" data-unix="{{ issue.first_seen_at }}">{{ issue.first_seen_at }}</time></span>
             </a>
           </td>
+          <td class="issue-tags-cell">
+            {% for issue_tag in issue.tags | default(value=[]) %}
+            {% set issue_tag_enc = issue_tag | urlencode %}
+            {% set issue_href = "/projects/" ~ project.slug ~ "?tag=" ~ issue_tag_enc %}
+            {{ ui::tag_chip(tag=issue_tag, href=issue_href) }}
+            {% else %}
+            <span class="text-secondary">—</span>
+            {% endfor %}
+          </td>
           <td>{{ ui::status(value=issue_status) }}</td>
           <td class="text-end tabular-nums">{{ issue.event_count | default(value=1) }}</td>
           <td>
@@ -27,7 +37,7 @@
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="4">{{ ui::empty(title="No issues yet", message="Send an event with an ingest key to begin tracking failures.") }}</td></tr>
+        <tr><td colspan="5">{{ ui::empty(title="No issues yet", message="Send an event with an ingest key to begin tracking failures.") }}</td></tr>
         {% endfor %}
       </tbody>
     </table>

@@ -218,6 +218,32 @@ pub fn bearer(headers: &HeaderMap) -> AppResult<&str> {
         .ok_or(AppError::Unauthorized)
 }
 
+/// Prefix identifying a personal API token issued from the settings page.
+pub const API_TOKEN_PREFIX: &str = "zpat_";
+
+/// Resolves an `Authorization: Bearer zpat_…` personal API token to the
+/// owning user id. Revoked or unknown tokens are rejected with 401, and the
+/// last-used timestamp is refreshed on success.
+pub async fn api_token_user(state: &AppState, headers: &HeaderMap) -> AppResult<i64> {
+    let bearer = bearer(headers)?;
+    if !bearer.starts_with(API_TOKEN_PREFIX) {
+        return Err(AppError::Unauthorized);
+    }
+    let hash = token_hash(bearer);
+    let user_id = sqlx::query_scalar::<_, i64>(
+        "SELECT user_id FROM api_tokens WHERE token_hash=? AND revoked_at IS NULL",
+    )
+    .bind(&hash)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::Unauthorized)?;
+    sqlx::query("UPDATE api_tokens SET last_used_at=unixepoch() WHERE token_hash=?")
+        .bind(&hash)
+        .execute(&state.db)
+        .await?;
+    Ok(user_id)
+}
+
 pub async fn require_project_role(
     state: &AppState,
     user_id: i64,

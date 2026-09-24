@@ -4,7 +4,7 @@ use std::path::{Component, Path};
 use axum::{
     Json,
     body::{Body, Bytes},
-    extract::{Form, Path as AxumPath, State},
+    extract::{Form, Path as AxumPath, Query, State},
     http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
@@ -100,6 +100,40 @@ pub struct WebhookForm {
     secret: Option<String>,
 }
 
+#[derive(Deserialize)]
+pub struct TokenForm {
+    csrf_token: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+pub struct TagsForm {
+    csrf_token: String,
+    tags: String,
+}
+
+#[derive(Deserialize)]
+pub struct ProjectQuery {
+    /// Comma-separated tag filters; issues must carry every listed tag.
+    tag: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub struct IssueListQuery {
+    /// Comma-separated tag filters; issues must carry every listed tag.
+    tag: Option<String>,
+    status: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+#[cfg_attr(feature = "docs", derive(utoipa::ToSchema))]
+#[derive(Deserialize)]
+pub struct UpdateTagsPayload {
+    /// Replacement tag set; an empty list removes all tags.
+    pub tags: Vec<String>,
+}
+
 #[derive(Debug, Serialize, FromRow)]
 struct ProjectRow {
     id: String,
@@ -175,6 +209,36 @@ struct KeyRow {
     key_prefix: String,
     created_at: i64,
     last_used_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize, FromRow)]
+struct ApiTokenRow {
+    id: i64,
+    name: String,
+    token_prefix: String,
+    created_at: i64,
+    last_used_at: Option<i64>,
+}
+
+/// Issue row used by listings; `tags` is filled in after the main query.
+#[cfg_attr(feature = "docs", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, FromRow)]
+pub struct IssueJson {
+    id: i64,
+    title: String,
+    status: String,
+    event_count: i64,
+    first_seen_at: i64,
+    last_seen_at: i64,
+    fingerprint: String,
+    #[sqlx(skip)]
+    tags: Vec<String>,
+}
+
+#[cfg_attr(feature = "docs", derive(utoipa::ToSchema))]
+#[derive(Serialize)]
+pub struct TagsResponse {
+    tags: Vec<String>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -403,6 +467,7 @@ pub async fn project(
     State(state): State<AppState>,
     cookies: Cookies,
     AxumPath(slug): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
 ) -> AppResult<Html<String>> {
     let session = auth::require_session(&state, &cookies).await?;
     let project_id = auth::require_project_role(&state, session.user.id, &slug, "viewer").await?;
@@ -415,13 +480,9 @@ pub async fn project(
     .bind(session.user.id)
     .fetch_one(&state.db)
     .await?;
-    let issues = sqlx::query_as::<_, IssueRow>(
-        "SELECT id, title, status, event_count, first_seen_at, last_seen_at, fingerprint
-         FROM issues WHERE project_id=? ORDER BY last_seen_at DESC LIMIT 100",
-    )
-    .bind(project_id)
-    .fetch_all(&state.db)
-    .await?;
+    let filter_tags = filter_tags(query.tag.as_deref())?;
+    let issues = fetch_issues(&state.db, project_id, &filter_tags, None, 100, 0).await?;
+    let project_tags = project_tag_list(&state.db, project_id).await?;
     let can_manage = auth::role_rank(&project.role) >= auth::role_rank("admin");
     let keys = if can_manage {
         sqlx::query_as::<_, KeyRow>(
@@ -460,6 +521,8 @@ pub async fn project(
     let mut context = page_context(&session.user, &session.csrf_token);
     context.insert("project", &project);
     context.insert("issues", &issues);
+    context.insert("project_tags", &project_tags);
+    context.insert("filter_tags", &filter_tags);
     context.insert("ingest_keys", &keys);
     context.insert("members", &members);
     context.insert("notification_endpoints", &endpoints);
@@ -578,13 +641,7 @@ pub async fn create_ingest_key(
     .bind(session.user.id)
     .fetch_one(&state.db)
     .await?;
-    let issues = sqlx::query_as::<_, IssueRow>(
-        "SELECT id, title, status, event_count, first_seen_at, last_seen_at, fingerprint
-         FROM issues WHERE project_id=? ORDER BY last_seen_at DESC LIMIT 100",
-    )
-    .bind(project_id)
-    .fetch_all(&state.db)
-    .await?;
+    let issues = fetch_issues(&state.db, project_id, &[], None, 100, 0).await?;
     let keys = sqlx::query_as::<_, KeyRow>(
         "SELECT id, name, key_prefix, created_at, last_used_at FROM ingest_keys
          WHERE project_id=? AND revoked_at IS NULL ORDER BY created_at DESC",
@@ -611,6 +668,8 @@ pub async fn create_ingest_key(
     context.insert("project", &project);
     context.insert("ingest_key", &key);
     context.insert("issues", &issues);
+    context.insert("project_tags", &Vec::<String>::new());
+    context.insert("filter_tags", &Vec::<String>::new());
     context.insert("ingest_keys", &keys);
     context.insert("members", &members);
     context.insert("notification_endpoints", &endpoints);
@@ -705,6 +764,12 @@ async fn load_issue_details(
     .await?;
     let mut issue_value = serde_json::to_value(&issue)
         .map_err(|error| AppError::BadRequest(format!("could not render issue: {error}")))?;
+    if let Some(object) = issue_value.as_object_mut() {
+        object.insert(
+            "tags".into(),
+            json!(tags_for_issue(&state.db, issue_id).await?),
+        );
+    }
     if let Some(latest) = event_views.first()
         && let Ok(payload) = serde_json::from_str::<Value>(&latest.payload_json)
         && let Some(object) = issue_value.as_object_mut()
@@ -737,6 +802,149 @@ async fn load_issue_details(
         comments,
         activity,
     })
+}
+
+/// Validates the comma-separated `?tag=` filter value.
+fn filter_tags(raw: Option<&str>) -> AppResult<Vec<String>> {
+    let Some(raw) = raw else {
+        return Ok(Vec::new());
+    };
+    crate::tags::normalize_comma_separated(raw)
+        .map_err(|error| AppError::BadRequest(format!("tag filter {error}")))
+}
+
+/// Distinct tags across a project, used for the filter autocomplete.
+async fn project_tag_list(db: &sqlx::SqlitePool, project_id: i64) -> AppResult<Vec<String>> {
+    let tags = sqlx::query_scalar(
+        "SELECT DISTINCT t.tag FROM issue_tags t JOIN issues i ON i.id=t.issue_id
+         WHERE i.project_id=? ORDER BY t.tag LIMIT 200",
+    )
+    .bind(project_id)
+    .fetch_all(db)
+    .await?;
+    Ok(tags)
+}
+
+async fn tags_for_issue<'e, E>(db: E, issue_id: i64) -> AppResult<Vec<String>>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    let tags = sqlx::query_scalar("SELECT tag FROM issue_tags WHERE issue_id=? ORDER BY tag")
+        .bind(issue_id)
+        .fetch_all(db)
+        .await?;
+    Ok(tags)
+}
+
+/// Lists issues for a project, newest activity first, optionally narrowed to
+/// a status and to issues carrying every one of the given tags.
+async fn fetch_issues(
+    db: &sqlx::SqlitePool,
+    project_id: i64,
+    tags: &[String],
+    status: Option<&str>,
+    limit: i64,
+    offset: i64,
+) -> AppResult<Vec<IssueJson>> {
+    // Only `?` placeholders and fixed SQL fragments are appended; every
+    // dynamic value flows through push_bind.
+    let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+        "SELECT id, title, status, event_count, first_seen_at, last_seen_at, fingerprint
+         FROM issues i WHERE i.project_id=",
+    );
+    builder.push_bind(project_id);
+    if let Some(status) = status {
+        builder.push(" AND i.status=").push_bind(status);
+    }
+    if !tags.is_empty() {
+        builder.push(
+            " AND (SELECT count(DISTINCT t.tag) FROM issue_tags t
+               WHERE t.issue_id=i.id AND t.tag IN (",
+        );
+        let mut separated = builder.separated(", ");
+        for tag in tags {
+            separated.push_bind(tag);
+        }
+        separated.push_unseparated(")) = ");
+        builder.push_bind(tags.len() as i64);
+    }
+    builder
+        .push(" ORDER BY i.last_seen_at DESC LIMIT ")
+        .push_bind(limit)
+        .push(" OFFSET ")
+        .push_bind(offset);
+    let mut issues = builder.build_query_as::<IssueJson>().fetch_all(db).await?;
+    if !issues.is_empty() {
+        let mut builder = sqlx::QueryBuilder::<sqlx::Sqlite>::new(
+            "SELECT issue_id, tag FROM issue_tags WHERE issue_id IN (",
+        );
+        let mut separated = builder.separated(", ");
+        for issue in &issues {
+            separated.push_bind(issue.id);
+        }
+        separated.push_unseparated(") ORDER BY tag");
+        let rows = builder.build().fetch_all(db).await?;
+        let mut by_issue: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
+        for row in rows {
+            by_issue
+                .entry(row.get::<i64, _>(0))
+                .or_default()
+                .push(row.get::<String, _>(1));
+        }
+        for issue in &mut issues {
+            if let Some(tags) = by_issue.remove(&issue.id) {
+                issue.tags = tags;
+            }
+        }
+    }
+    Ok(issues)
+}
+
+/// Replaces the tag set of one issue and records the change as activity.
+async fn replace_issue_tags(
+    db: &sqlx::SqlitePool,
+    project_id: i64,
+    issue_id: i64,
+    user_id: Option<i64>,
+    tags: Vec<String>,
+) -> AppResult<Vec<String>> {
+    let mut tx = db.begin().await?;
+    sqlx::query_scalar::<_, i64>("SELECT id FROM issues WHERE id=? AND project_id=?")
+        .bind(issue_id)
+        .bind(project_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let previous = tags_for_issue(&mut *tx, issue_id).await?;
+    sqlx::query("DELETE FROM issue_tags WHERE issue_id=?")
+        .bind(issue_id)
+        .execute(&mut *tx)
+        .await?;
+    for tag in &tags {
+        sqlx::query(
+            "INSERT INTO issue_tags (issue_id, tag) VALUES (?, ?)
+             ON CONFLICT(issue_id, tag) DO NOTHING",
+        )
+        .bind(issue_id)
+        .bind(tag)
+        .execute(&mut *tx)
+        .await?;
+    }
+    if previous != tags {
+        sqlx::query(
+            "INSERT INTO issue_activity (issue_id, user_id, kind, details_json)
+             VALUES (?, ?, 'tags', ?)",
+        )
+        .bind(issue_id)
+        .bind(user_id)
+        .bind(json!({ "from": previous, "to": tags }).to_string())
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    // Return the stored (sorted) set so API responses match list output.
+    tags_for_issue(db, issue_id).await
 }
 
 pub async fn issue(
@@ -896,8 +1104,26 @@ pub async fn add_comment(
     Ok(Redirect::to(&format!("/projects/{slug}/issues/{issue_id}")))
 }
 
-pub async fn settings(State(state): State<AppState>, cookies: Cookies) -> AppResult<Html<String>> {
+pub async fn update_issue_tags_form(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
+    Form(form): Form<TagsForm>,
+) -> AppResult<Redirect> {
     let session = auth::require_session(&state, &cookies).await?;
+    auth::check_csrf(&session, &form.csrf_token)?;
+    let project_id =
+        auth::require_project_role(&state, session.user.id, &slug, "developer").await?;
+    let tags = crate::tags::normalize_comma_separated(&form.tags).map_err(AppError::BadRequest)?;
+    replace_issue_tags(&state.db, project_id, issue_id, Some(session.user.id), tags).await?;
+    Ok(Redirect::to(&format!("/projects/{slug}/issues/{issue_id}")))
+}
+
+async fn settings_context(
+    state: &AppState,
+    session: &auth::Session,
+    current_session_hash: Option<String>,
+) -> AppResult<Context> {
     let projects = sqlx::query_as::<_, ProjectRow>(
         "SELECT p.slug AS id, p.slug, p.name, m.role, p.created_at, p.description, p.status,
                 '/api/v1/projects/' || p.slug || '/events' AS ingest_url FROM projects p
@@ -919,19 +1145,95 @@ pub async fn settings(State(state): State<AppState>, cookies: Cookies) -> AppRes
     let mut context = page_context(&session.user, &session.csrf_token);
     context.insert("projects", &projects);
     context.insert("notification_endpoints", &endpoints);
-    let current_token_hash = cookies
-        .get(auth::SESSION_COOKIE)
-        .map(|cookie| auth::token_hash(cookie.value()));
     let sessions = sqlx::query_as::<_, SessionRow>(
         "SELECT id, created_at, expires_at, (token_hash = ?) AS is_current FROM sessions
          WHERE user_id=? AND expires_at > unixepoch() ORDER BY created_at DESC",
     )
-    .bind(current_token_hash.unwrap_or_default())
+    .bind(current_session_hash.unwrap_or_default())
     .bind(session.user.id)
     .fetch_all(&state.db)
     .await?;
     context.insert("sessions", &sessions);
+    let api_tokens = sqlx::query_as::<_, ApiTokenRow>(
+        "SELECT id, name, token_prefix, created_at, last_used_at FROM api_tokens
+         WHERE user_id=? AND revoked_at IS NULL ORDER BY created_at DESC",
+    )
+    .bind(session.user.id)
+    .fetch_all(&state.db)
+    .await?;
+    context.insert("api_tokens", &api_tokens);
+    Ok(context)
+}
+
+pub async fn settings(State(state): State<AppState>, cookies: Cookies) -> AppResult<Html<String>> {
+    let session = auth::require_session(&state, &cookies).await?;
+    let current_hash = cookies
+        .get(auth::SESSION_COOKIE)
+        .map(|cookie| auth::token_hash(cookie.value()));
+    let context = settings_context(&state, &session, current_hash).await?;
     render(&state, "settings.html", context)
+}
+
+pub async fn create_api_token(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Form(form): Form<TokenForm>,
+) -> AppResult<Html<String>> {
+    let session = auth::require_session(&state, &cookies).await?;
+    auth::check_csrf(&session, &form.csrf_token)?;
+    let name = required_text("name", &form.name, 100)?;
+    let token = format!("{}{}", auth::API_TOKEN_PREFIX, auth::random_token(32));
+    sqlx::query(
+        "INSERT INTO api_tokens (user_id, name, token_prefix, token_hash) VALUES (?, ?, ?, ?)",
+    )
+    .bind(session.user.id)
+    .bind(name)
+    .bind(&token[..auth::API_TOKEN_PREFIX.len() + 6])
+    .bind(auth::token_hash(&token))
+    .execute(&state.db)
+    .await?;
+    audit::record(
+        &state.db,
+        Some(session.user.id),
+        "api_token.created",
+        Some("api_token"),
+        None,
+        json!({}),
+    )
+    .await?;
+    let current_hash = cookies
+        .get(auth::SESSION_COOKIE)
+        .map(|cookie| auth::token_hash(cookie.value()));
+    let mut context = settings_context(&state, &session, current_hash).await?;
+    context.insert("new_api_token", &token);
+    render(&state, "settings.html", context)
+}
+
+pub async fn revoke_api_token(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    AxumPath(token_id): AxumPath<i64>,
+    Form(form): Form<CsrfForm>,
+) -> AppResult<Redirect> {
+    let session = auth::require_session(&state, &cookies).await?;
+    auth::check_csrf(&session, &form.csrf_token)?;
+    sqlx::query(
+        "UPDATE api_tokens SET revoked_at=unixepoch() WHERE id=? AND user_id=? AND revoked_at IS NULL",
+    )
+    .bind(token_id)
+    .bind(session.user.id)
+    .execute(&state.db)
+    .await?;
+    audit::record(
+        &state.db,
+        Some(session.user.id),
+        "api_token.revoked",
+        Some("api_token"),
+        Some(token_id.to_string()),
+        json!({}),
+    )
+    .await?;
+    Ok(Redirect::to("/settings"))
 }
 
 pub async fn change_password(
@@ -1196,6 +1498,7 @@ pub async fn ingest(
         .map_err(|error| AppError::BadRequest(format!("invalid JSON: {error}")))?;
     let fingerprint = event_fingerprint(&value);
     let title: String = event.message.chars().take(200).collect();
+    let event_labels = crate::tags::labels_from_event_tags(&event.tags);
     let producer_event_id = event.event_id;
     let storage_id = Uuid::new_v4().to_string();
     let payload = String::from_utf8(body.to_vec())
@@ -1299,6 +1602,30 @@ pub async fn ingest(
             (issue_id, Some("issue.created"))
         }
     };
+    // Event tags become flat issue labels. The first event seeds the set and
+    // later occurrences only add new labels; removing tags is a manual act.
+    if !event_labels.is_empty() {
+        let stored: i64 = sqlx::query_scalar("SELECT count(*) FROM issue_tags WHERE issue_id=?")
+            .bind(issue_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        let mut room = crate::tags::MAX_TAGS as i64 - stored;
+        for label in &event_labels {
+            if room <= 0 {
+                break;
+            }
+            let inserted = sqlx::query(
+                "INSERT INTO issue_tags (issue_id, tag) VALUES (?, ?)
+                 ON CONFLICT(issue_id, tag) DO NOTHING",
+            )
+            .bind(issue_id)
+            .bind(label)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected();
+            room -= inserted as i64;
+        }
+    }
     sqlx::query(
         "INSERT INTO events (id, project_id, issue_id, fingerprint, payload_json) VALUES (?, ?, ?, ?, ?)",
     ).bind(&storage_id).bind(project_id).bind(issue_id).bind(&fingerprint).bind(&payload)
@@ -1335,6 +1662,130 @@ pub async fn ingest(
             duplicate: false,
         }),
     ))
+}
+
+#[cfg_attr(feature = "docs", utoipa::path(
+    get,
+    path = "/api/v1/projects/{slug}/issues",
+    tag = "issues",
+    operation_id = "listIssues",
+    params(
+        ("slug" = String, Path, description = "Project slug"),
+        ("tag" = Option<String>, Query, description = "Comma-separated tags; issues must carry every listed tag"),
+        ("status" = Option<String>, Query, description = "unresolved, resolved, or ignored"),
+        ("limit" = Option<u32>, Query, description = "Page size, 1-200 (default 50)"),
+        ("offset" = Option<u32>, Query, description = "Number of issues to skip"),
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Issues ordered by most recent activity", body = [IssueJson]),
+        (status = 400, description = "Invalid tag or status filter", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid API token", body = ApiErrorResponse),
+        (status = 404, description = "Unknown project or no membership", body = ApiErrorResponse),
+    )
+))]
+pub async fn list_issues(
+    State(state): State<AppState>,
+    AxumPath(slug): AxumPath<String>,
+    headers: HeaderMap,
+    Query(query): Query<IssueListQuery>,
+) -> Result<Json<Vec<IssueJson>>, ApiError> {
+    let user_id = auth::api_token_user(&state, &headers).await?;
+    let project_id = auth::require_project_role(&state, user_id, &slug, "viewer").await?;
+    if let Some(status) = query.status.as_deref()
+        && !["unresolved", "resolved", "ignored"].contains(&status)
+    {
+        return Err(
+            AppError::BadRequest("status must be unresolved, resolved, or ignored".into()).into(),
+        );
+    }
+    let tags = filter_tags(query.tag.as_deref())?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let offset = i64::from(query.offset.unwrap_or(0));
+    let issues = fetch_issues(
+        &state.db,
+        project_id,
+        &tags,
+        query.status.as_deref(),
+        i64::from(limit),
+        offset,
+    )
+    .await?;
+    Ok(Json(issues))
+}
+
+#[cfg_attr(feature = "docs", utoipa::path(
+    get,
+    path = "/api/v1/projects/{slug}/issues/{issue_id}",
+    tag = "issues",
+    operation_id = "getIssue",
+    params(
+        ("slug" = String, Path, description = "Project slug"),
+        ("issue_id" = i64, Path, description = "Issue identifier"),
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "The issue including its tags", body = IssueJson),
+        (status = 401, description = "Missing or invalid API token", body = ApiErrorResponse),
+        (status = 404, description = "Unknown project, issue, or no membership", body = ApiErrorResponse),
+    )
+))]
+pub async fn get_issue(
+    State(state): State<AppState>,
+    AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
+    headers: HeaderMap,
+) -> Result<Json<IssueJson>, ApiError> {
+    let user_id = auth::api_token_user(&state, &headers).await?;
+    let project_id = auth::require_project_role(&state, user_id, &slug, "viewer").await?;
+    let mut issue = sqlx::query_as::<_, IssueJson>(
+        "SELECT id, title, status, event_count, first_seen_at, last_seen_at, fingerprint
+         FROM issues WHERE id=? AND project_id=?",
+    )
+    .bind(issue_id)
+    .bind(project_id)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    issue.tags = tags_for_issue(&state.db, issue_id).await?;
+    Ok(Json(issue))
+}
+
+#[cfg_attr(feature = "docs", utoipa::path(
+    put,
+    path = "/api/v1/projects/{slug}/issues/{issue_id}/tags",
+    tag = "issues",
+    operation_id = "updateIssueTags",
+    params(
+        ("slug" = String, Path, description = "Project slug"),
+        ("issue_id" = i64, Path, description = "Issue identifier"),
+    ),
+    request_body = UpdateTagsPayload,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Replacement tag set stored", body = TagsResponse),
+        (status = 401, description = "Missing or invalid API token", body = ApiErrorResponse),
+        (status = 403, description = "Token owner is only a viewer on this project", body = ApiErrorResponse),
+        (status = 404, description = "Unknown project, issue, or no membership", body = ApiErrorResponse),
+        (status = 422, description = "Tags failed validation", body = ApiErrorResponse),
+    )
+))]
+pub async fn update_issue_tags(
+    State(state): State<AppState>,
+    AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
+    headers: HeaderMap,
+    Json(payload): Json<UpdateTagsPayload>,
+) -> Result<Json<TagsResponse>, ApiError> {
+    let user_id = auth::api_token_user(&state, &headers).await?;
+    let project_id = auth::require_project_role(&state, user_id, &slug, "developer").await?;
+    let tags =
+        crate::tags::normalize_tags(payload.tags.iter().map(String::as_str)).map_err(|error| {
+            AppError::Unprocessable {
+                field: Some("tags".into()),
+                message: error,
+            }
+        })?;
+    let tags = replace_issue_tags(&state.db, project_id, issue_id, Some(user_id), tags).await?;
+    Ok(Json(TagsResponse { tags }))
 }
 
 #[cfg_attr(feature = "docs", utoipa::path(
@@ -1569,6 +2020,14 @@ fn issue_markdown(details: &IssueDetails) -> String {
     let status = issue_field(issue, "status");
     if !status.is_empty() {
         let _ = writeln!(out, "- **Status:** {status}");
+    }
+    let tags: Vec<&str> = issue
+        .get("tags")
+        .and_then(Value::as_array)
+        .map(|values| values.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !tags.is_empty() {
+        let _ = writeln!(out, "- **Tags:** {}", tags.join(", "));
     }
     let severity = issue_field(issue, "severity");
     if !severity.is_empty() {

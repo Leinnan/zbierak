@@ -134,6 +134,11 @@ and must equal `1`; `severity` defaults to `error` and accepts `debug`, `info`,
 `user`, and `fingerprint`. The protocol crate documents their nested shapes and
 validation limits. Requests are capped at 1 MiB.
 
+The event's `tags` map seeds the issue's tags as flat `key:value` labels (a tag
+with an empty value becomes just `key`). The first occurrence sets them, and
+later occurrences only add labels that are not present yet, so tags can be
+curated manually without being erased by the next event.
+
 A new event returns HTTP `202 Accepted`:
 
 ```json
@@ -165,6 +170,52 @@ webfonts are disabled, so the page makes no third-party browser requests. These
 routes intentionally use a relaxed Content-Security-Policy and are
 unauthenticated, so keep them on loopback or behind a reverse proxy that
 restricts access in production.
+
+## Issue Tags And The Management API
+
+Issues carry flat string tags (labels). Rules: trimmed, 1–64 characters, no
+whitespace or commas, at most 50 tags per issue. Event tags are merged in at
+ingest time (see above); manual edits replace the whole set and are recorded in
+the issue activity stream. The project page filters the issue list by tag, and
+the issue page has a tag editor for members with the developer role or above.
+
+Management endpoints authenticate with **personal API tokens**, created under
+Settings → API tokens (prefix `zpat_`, shown once). A token acts as your user
+account, so project role checks still apply: listing requires `viewer`, editing
+tags requires `developer`.
+
+List and filter issues (`tag` accepts a comma-separated list with AND
+semantics; `status` is `unresolved`, `resolved`, or `ignored`):
+
+```sh
+curl --fail-with-body \
+  -H 'Authorization: Bearer zpat_REPLACE_WITH_API_TOKEN' \
+  'http://127.0.0.1:3000/api/v1/projects/storefront/issues?tag=env:prod&status=unresolved&limit=50'
+```
+
+Read one issue:
+
+```sh
+curl --fail-with-body \
+  -H 'Authorization: Bearer zpat_REPLACE_WITH_API_TOKEN' \
+  'http://127.0.0.1:3000/api/v1/projects/storefront/issues/1'
+```
+
+Replace an issue's tag set:
+
+```sh
+curl --fail-with-body -X PUT \
+  -H 'Authorization: Bearer zpat_REPLACE_WITH_API_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"tags": ["env:prod", "team:payments"]}' \
+  'http://127.0.0.1:3000/api/v1/projects/storefront/issues/1/tags'
+```
+
+List responses return issues ordered by most recent activity with a `tags`
+array per issue. Tag edits return the stored (sorted) set. Errors use the same
+JSON shape as ingestion, with `401` for a missing, invalid, or revoked token,
+`404` for unknown projects or issues outside your memberships, `403` when the
+token owner is only a viewer, and `422` when tags fail validation.
 
 ## Rust SDK
 
@@ -202,8 +253,10 @@ Incoming events are grouped by a BLAKE3 fingerprint. Clients can provide up to
 ten explicit fingerprint components; otherwise the service derives grouping
 from error/message and frame data. Issues can be `unresolved`, `resolved`, or
 `ignored`. A new occurrence reopens a resolved issue as a regression; ignored
-issues remain ignored. Status changes, comments, and regressions are recorded in
-the issue activity stream.
+issues remain ignored. Status changes, comments, tag edits, and regressions are
+recorded in the issue activity stream, and tags are included in the Markdown
+export. See [Issue Tags And The Management API](#issue-tags-and-the-management-api)
+for tag rules and API usage.
 
 Notifications are queued only when an issue is first created or when a resolved
 issue regresses. The durable SQLite outbox is committed with the event, then a

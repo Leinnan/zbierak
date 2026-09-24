@@ -59,13 +59,27 @@ separates it from potential future work.
 - Ingestion keys are random `zbk_` tokens. The database stores a SHA-256 hash and
   display prefix rather than the full key. Owners and admins can revoke keys
   from the project page; revoked keys immediately stop accepting events.
+- Personal API tokens (`zpat_` prefix) authenticate the management API as the
+  owning user. They are created in Settings, shown once, stored as a SHA-256
+  hash with a display prefix, and can be revoked at any time. Role checks still
+  apply per project: `viewer` can list issues, `developer` can edit tags.
 - Events are grouped into issues with BLAKE3 fingerprints. An explicit
   `fingerprint` array controls grouping; otherwise selected error/message and
   frame fields are collected. A new event reopens a resolved issue but does not
   reopen an ignored issue.
 - The UI lists up to 100 issues per project and the most recent 20 event rows per
   issue. It supports status values `unresolved`, `resolved`, and `ignored`, plus
-  comments up to 10,000 characters.
+  comments up to 10,000 characters. The project page can filter the issue list
+  by tags via `?tag=a,b` (AND semantics) with an autocomplete over the
+  project's distinct tags.
+- Issues carry flat string tags stored in the `issue_tags` table (one row per
+  issue/tag pair). Tags are trimmed, 1–64 characters, may not contain
+  whitespace or commas, and an issue holds at most 50. Event tags seed the set
+  at ingest (`key:value` labels, `key` for empty values) and later occurrences
+  merge additively; manual edits replace the whole set and record a `tags`
+  activity entry. The issue page offers a comma-separated tag editor for
+  members with the developer role or above, and tags appear in the Markdown
+  export.
 - Status changes and comments are recorded in an issue activity stream. An event
   matching a resolved issue reopens it and records a system regression entry;
   ignored issues are not automatically reopened.
@@ -97,6 +111,17 @@ separates it from potential future work.
 - Successful new and duplicate ingestion returns HTTP 202 with producer event
   ID, issue ID, fingerprint, and a `duplicate` boolean. Oversized bodies return
   413 `payload_too_large`.
+- The management API authenticates with a personal API token as
+  `Authorization: Bearer zpat_…`:
+  - `GET /api/v1/projects/{slug}/issues` lists issues ordered by most recent
+    activity with `tag` (comma-separated, AND semantics), `status`, `limit`
+    (1–200, default 50), and `offset` query parameters, including a sorted
+    `tags` array per issue.
+  - `GET /api/v1/projects/{slug}/issues/{issue_id}` returns a single issue with
+    tags.
+  - `PUT /api/v1/projects/{slug}/issues/{issue_id}/tags` replaces the tag set
+    (`{"tags": [...]}`), requires the developer role, and returns the stored
+    set. Invalid tags fail with 422 `validation_failed` on the `tags` field.
 
 ### Rust SDK
 

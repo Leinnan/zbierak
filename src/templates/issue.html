@@ -63,6 +63,25 @@
   </div>
 
   <aside class="issue-sidebar" aria-label="Issue details">
+    <section class="card tags-card"><div class="card-body">
+      <h2 class="detail-title">Tags</h2>
+      <div class="tag-list">
+        {% for issue_tag in issue.tags | default(value=[]) %}
+        {{ ui::tag_chip(tag=issue_tag) }}
+        {% else %}
+        <p class="text-secondary">No tags yet.</p>
+        {% endfor %}
+      </div>
+      {% if project.role != "viewer" %}
+      <form class="tag-edit-form" method="post" action="/projects/{{ slug }}/issues/{{ issue.id }}/tags">
+        {{ ui::csrf(token=csrf_token) }}
+        <label class="form-label" for="issue-tags-input">Edit tags</label>
+        <input class="form-control" id="issue-tags-input" name="tags" value="{{ issue.tags | default(value=[]) | join(sep=', ') }}" placeholder="env:prod, priority:high" autocomplete="off">
+        <div class="form-hint">Comma-separated; at most 50 tags of up to 64 characters.</div>
+        <button class="btn btn-primary btn-sm" type="submit">Save tags</button>
+      </form>
+      {% endif %}
+    </div></section>
     <section class="card"><div class="card-body"><h2 class="detail-title">Issue details</h2><dl class="detail-list"><div><dt>Status</dt><dd>{{ issue.status }}</dd></div><div><dt>First seen</dt><dd><time class="js-local-time" data-unix="{{ issue.first_seen_at }}">{{ issue.first_seen_at }}</time></dd></div><div><dt>Last seen</dt><dd><time class="js-local-time" data-unix="{{ issue.last_seen_at }}">{{ issue.last_seen_at }}</time></dd></div><div><dt>Events</dt><dd>{{ issue.event_count }}</dd></div>{% if issue.environment | default(value="") %}<div><dt>Environment</dt><dd>{{ issue.environment }}</dd></div>{% endif %}{% if issue.release | default(value="") %}<div><dt>Release</dt><dd>{{ issue.release }}</dd></div>{% endif %}</dl></div></section>
     {% if activity | default(value=[]) | length > 0 %}<section class="card activity-card"><div class="card-body"><h2 class="detail-title">Activity</h2><ol>{% for item in activity %}<li><strong>{{ item.display_name | default(value="System") }}</strong> {{ item.kind }}<time class="js-local-time" data-unix="{{ item.created_at }}">{{ item.created_at }}</time></li>{% endfor %}</ol></div></section>{% endif %}
   </aside>

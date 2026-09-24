@@ -13,6 +13,7 @@ mod openapi;
 mod outbox;
 mod secrets;
 pub use secrets::{decrypt, encrypt, generate_key, parse_key};
+mod tags;
 
 use std::{sync::Arc, time::Duration};
 
@@ -22,7 +23,7 @@ use axum::{
     http::{HeaderName, HeaderValue, Request},
     middleware::{self, Next},
     response::Response,
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use sqlx::SqlitePool;
 use tera::Tera;
@@ -83,6 +84,10 @@ pub fn router(state: AppState) -> Router {
             "/projects/{slug}/issues/{issue_id}/reopen",
             post(handlers::reopen_issue),
         )
+        .route(
+            "/projects/{slug}/issues/{issue_id}/tags",
+            post(handlers::update_issue_tags_form),
+        )
         .route("/settings", get(handlers::settings))
         .route("/settings/password", post(handlers::change_password))
         .route(
@@ -102,6 +107,20 @@ pub fn router(state: AppState) -> Router {
             post(handlers::delete_webhook),
         )
         .route("/api/v1/projects/{slug}/events", post(handlers::ingest))
+        .route("/api/v1/projects/{slug}/issues", get(handlers::list_issues))
+        .route(
+            "/api/v1/projects/{slug}/issues/{issue_id}",
+            get(handlers::get_issue),
+        )
+        .route(
+            "/api/v1/projects/{slug}/issues/{issue_id}/tags",
+            put(handlers::update_issue_tags),
+        )
+        .route("/settings/tokens", post(handlers::create_api_token))
+        .route(
+            "/settings/tokens/{token_id}/revoke",
+            post(handlers::revoke_api_token),
+        )
         .route("/health", get(handlers::health))
         .route("/ready", get(handlers::ready))
         .route("/static/{*path}", get(handlers::static_asset))

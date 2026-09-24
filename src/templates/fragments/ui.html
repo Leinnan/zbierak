@@ -19,3 +19,7 @@
 {% macro csrf(token="") %}
 {% if token | default(value="") %}<input type="hidden" name="csrf_token" value="{{ token }}">{% endif %}
 {% endmacro csrf %}
+
+{% macro tag_chip(tag, href="") %}
+{% if href | default(value="") %}<a class="tag-chip" href="{{ href }}">{{ tag }}</a>{% else %}<span class="tag-chip">{{ tag }}</span>{% endif %}
+{% endmacro tag_chip %}

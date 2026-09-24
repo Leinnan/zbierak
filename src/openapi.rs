@@ -7,13 +7,11 @@
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path as AxumPath, Query},
     http::{HeaderValue, Request, header},
     middleware::{self, Next},
     response::Response,
     routing::get,
 };
-use serde::{Deserialize, Serialize};
 use utoipa::{
     Modify, OpenApi,
     openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme},
@@ -34,9 +32,11 @@ use zbierak_protocol::{self as protocol, ApiErrorResponse as ApiErrorSchema};
     ),
     paths(
         handlers::ingest,
+        handlers::list_issues,
+        handlers::get_issue,
+        handlers::update_issue_tags,
         handlers::health,
         handlers::ready,
-        list_issues_example,
     ),
     components(schemas(
         protocol::Event,
@@ -48,13 +48,15 @@ use zbierak_protocol::{self as protocol, ApiErrorResponse as ApiErrorSchema};
         protocol::IngestResponse,
         protocol::IngestStatus,
         handlers::IngestResponse,
+        handlers::IssueJson,
+        handlers::UpdateTagsPayload,
+        handlers::TagsResponse,
         ApiErrorSchema,
-        IssueSummary,
     )),
     modifiers(&SecurityAddon),
     tags(
         (name = "events", description = "Event ingestion"),
-        (name = "issues", description = "Issue listing"),
+        (name = "issues", description = "Issue listing, filtering, and tags"),
         (name = "system", description = "Health and readiness"),
     ),
 )]
@@ -75,50 +77,6 @@ impl Modify for SecurityAddon {
             ),
         );
     }
-}
-
-/// Example schema returned by [`list_issues_example`].
-#[derive(Serialize, utoipa::ToSchema)]
-pub struct IssueSummary {
-    pub id: i64,
-    pub title: String,
-    pub status: String,
-}
-
-/// Example query parameters accepted by [`list_issues_example`].
-#[derive(Deserialize)]
-pub struct Pagination {
-    pub limit: Option<u32>,
-    pub offset: Option<u32>,
-}
-
-/// Reference handler demonstrating `Path`, `Query`, and JSON responses.
-///
-/// It is intentionally not mounted on the router. Adapt the body to your own
-/// storage layer and register the route in the application router; the
-/// OpenAPI path is already part of [`ApiDoc`].
-#[allow(dead_code)]
-#[utoipa::path(
-    get,
-    path = "/api/v1/projects/{slug}/issues",
-    tag = "issues",
-    operation_id = "listIssues",
-    params(
-        ("slug" = String, Path, description = "Project slug"),
-        ("limit" = Option<u32>, Query, description = "Maximum issues to return"),
-        ("offset" = Option<u32>, Query, description = "Number of issues to skip"),
-    ),
-    responses(
-        (status = 200, description = "Issues ordered by most recent activity", body = [IssueSummary]),
-        (status = 404, description = "Unknown project", body = ApiErrorSchema),
-    )
-)]
-pub async fn list_issues_example(
-    AxumPath(slug): AxumPath<String>,
-    Query(pagination): Query<Pagination>,
-) -> Json<Vec<IssueSummary>> {
-    let _ = (slug, pagination.limit, pagination.offset);
-    Json(Vec::new())
 }
 
 /// The vendored Scalar browser bundle, embedded only in `docs` builds.

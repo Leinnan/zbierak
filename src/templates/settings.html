@@ -5,7 +5,7 @@
 <header class="page-heading"><div><p class="eyebrow">Settings</p><h1>Settings</h1><p>Notification delivery and account security.</p></div></header>
 
 <div class="settings-layout">
-  <nav class="settings-nav" aria-label="Settings sections"><a href="#endpoints">Endpoints</a><a href="#add-endpoint">Add endpoint</a><a href="#account">Account</a></nav>
+  <nav class="settings-nav" aria-label="Settings sections"><a href="#endpoints">Endpoints</a><a href="#add-endpoint">Add endpoint</a><a href="#api-tokens">API tokens</a><a href="#account">Account</a></nav>
   <div class="settings-content">
     <section class="settings-section" id="endpoints" aria-labelledby="endpoints-title">
       <div class="section-heading"><div><p class="eyebrow">Destinations</p><h2 id="endpoints-title">Configured endpoints</h2></div><span>{{ notification_endpoints | default(value=[]) | length }}</span></div>
@@ -75,6 +75,44 @@
         <div class="alert alert-info">Create a project before configuring notifications.</div>
         {% endfor %}
       </div>
+    </section>
+
+    <section class="settings-section" id="api-tokens" aria-labelledby="api-tokens-title">
+      <div class="section-heading"><div><p class="eyebrow">Access</p><h2 id="api-tokens-title">API tokens</h2></div><span>{{ api_tokens | default(value=[]) | length }}</span></div>
+      {% if new_api_token | default(value="") %}
+      <section class="key-reveal" role="status">
+        <div>
+          <p class="eyebrow">Created successfully</p>
+          <h3>Copy your API token now</h3>
+          <p>This secret is shown once. It grants management API access as your user account.</p>
+        </div>
+        <div class="secret-value"><code id="new-api-token">{{ new_api_token }}</code><button class="btn btn-light btn-sm" type="button" data-copy-target="#new-api-token">Copy token</button></div>
+      </section>
+      {% endif %}
+      <article class="card endpoint-create-card">
+        <div class="card-header"><div><h3 class="card-title">Personal access tokens</h3><p>Send as <code>Authorization: Bearer …</code> to list and filter issues or edit their tags.</p></div></div>
+        <div class="list-group list-group-flush">
+          {% for token in api_tokens | default(value=[]) %}
+          <div class="list-group-item management-row">
+            <div><strong>{{ token.name }}</strong><small><code>{{ token.token_prefix }}…</code></small></div>
+            <div class="text-end"><small>Created <time class="js-local-time" data-unix="{{ token.created_at }}">{{ token.created_at }}</time></small><small>{% if token.last_used_at %}Last used <time class="js-local-time" data-unix="{{ token.last_used_at }}">{{ token.last_used_at }}</time>{% else %}Never used{% endif %}</small></div>
+            <form method="post" action="/settings/tokens/{{ token.id }}/revoke">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="btn btn-sm btn-outline-danger" type="submit" data-confirm="Revoke token {{ token.name }}?">Revoke</button>
+            </form>
+          </div>
+          {% else %}
+          <div class="list-group-item text-secondary">No API tokens yet.</div>
+          {% endfor %}
+        </div>
+        <div class="card-footer">
+          <form class="compact-form" method="post" action="/settings/tokens">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><label class="form-label" for="api-token-name">Token name</label><input class="form-control" id="api-token-name" name="name" maxlength="100" placeholder="CI pipeline" required></div>
+            <button class="btn btn-primary" type="submit">Create token</button>
+          </form>
+        </div>
+      </article>
     </section>
 
     <section class="settings-section" id="account" aria-labelledby="account-title">
