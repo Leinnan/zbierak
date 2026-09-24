@@ -92,7 +92,9 @@ code, pre, .tabular-nums { font-family: ui-monospace, SFMono-Regular, Menlo, Mon
 .issue-heading h1 { max-width: 900px; font-size: clamp(1.8rem, 3vw, 2.6rem); overflow-wrap: anywhere; }
 .issue-heading > div > p { max-width: 850px; margin: .65rem 0 0; color: var(--zb-muted); }
 .fingerprint { color: var(--zb-muted); font: .72rem ui-monospace, monospace; }
-.issue-actions { flex: 0 0 auto; }
+.issue-actions { flex: 0 0 auto; display: flex; flex-direction: column; align-items: stretch; gap: .6rem; }
+.issue-actions-buttons { display: flex; flex-wrap: wrap; gap: .4rem; }
+.issue-actions-buttons .btn { flex: 1 1 auto; }
 .issue-layout { display: grid; grid-template-columns: minmax(0, 1fr) 260px; gap: 1.25rem; align-items: start; }
 .stack-card { overflow: hidden; }
 .stack-card .card-header { justify-content: space-between; }

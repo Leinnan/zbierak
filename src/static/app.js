@@ -50,6 +50,16 @@
     });
   }
 
+  function showCopyFeedback(button) {
+    var original = button.textContent;
+    button.textContent = "Copied";
+    button.classList.add("copy-success");
+    window.setTimeout(function () {
+      button.textContent = original;
+      button.classList.remove("copy-success");
+    }, 1600);
+  }
+
   function enhance(root) {
     prepareStackTraces(root);
     localizeTimes(root);
@@ -104,18 +114,26 @@
         return;
       }
 
+      var copyUrlButton = event.target.closest("[data-copy-url]");
+      if (copyUrlButton && navigator.clipboard) {
+        var url = copyUrlButton.dataset.copyUrl;
+        fetch(url, { credentials: "same-origin", headers: { Accept: "text/markdown" } })
+          .then(function (response) {
+            if (!response.ok) throw new Error("export failed");
+            return response.text();
+          })
+          .then(function (text) { return navigator.clipboard.writeText(text); })
+          .then(function () { showCopyFeedback(copyUrlButton); })
+          .catch(function () { window.open(url, "_blank"); });
+        return;
+      }
+
       var copyButton = event.target.closest("[data-copy], [data-copy-target]");
       if (copyButton && navigator.clipboard) {
         var target = copyButton.dataset.copyTarget && document.querySelector(copyButton.dataset.copyTarget);
         var value = copyButton.dataset.copy || (target ? target.textContent : "");
         navigator.clipboard.writeText(value).then(function () {
-          var original = copyButton.textContent;
-          copyButton.textContent = "Copied";
-          copyButton.classList.add("copy-success");
-          window.setTimeout(function () {
-            copyButton.textContent = original;
-            copyButton.classList.remove("copy-success");
-          }, 1600);
+          showCopyFeedback(copyButton);
         });
       }
     });

@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Component, Path};
 
 use axum::{
@@ -11,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sqlx::{FromRow, Row};
 use tera::Context;
+use time::{OffsetDateTime, format_description::well_known::Rfc3339};
 use tower_cookies::Cookies;
 use url::Url;
 use uuid::Uuid;
@@ -542,20 +544,28 @@ pub async fn create_ingest_key(
     render(&state, "project.html", context)
 }
 
-pub async fn issue(
-    State(state): State<AppState>,
-    cookies: Cookies,
-    AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
-) -> AppResult<Html<String>> {
-    let session = auth::require_session(&state, &cookies).await?;
-    let project_id = auth::require_project_role(&state, session.user.id, &slug, "viewer").await?;
+struct IssueDetails {
+    project: ProjectRow,
+    issue: Value,
+    events: Vec<EventView>,
+    comments: Vec<CommentRow>,
+    activity: Vec<ActivityRow>,
+}
+
+async fn load_issue_details(
+    state: &AppState,
+    user_id: i64,
+    slug: &str,
+    issue_id: i64,
+) -> AppResult<IssueDetails> {
+    let project_id = auth::require_project_role(state, user_id, slug, "viewer").await?;
     let project = sqlx::query_as::<_, ProjectRow>(
         "SELECT p.slug AS id, p.slug, p.name, m.role, p.created_at, p.description, p.status,
                 '/api/v1/projects/' || p.slug || '/events' AS ingest_url FROM projects p
          JOIN project_memberships m ON m.project_id=p.id WHERE p.id=? AND m.user_id=?",
     )
     .bind(project_id)
-    .bind(session.user.id)
+    .bind(user_id)
     .fetch_one(&state.db)
     .await?;
     let issue = sqlx::query_as::<_, IssueRow>(
@@ -617,14 +627,45 @@ pub async fn issue(
         );
         object.insert("stacktrace".into(), json!(format_stacktrace(&payload)));
     }
+    Ok(IssueDetails {
+        project,
+        issue: issue_value,
+        events: event_views,
+        comments,
+        activity,
+    })
+}
+
+pub async fn issue(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
+) -> AppResult<Html<String>> {
+    let session = auth::require_session(&state, &cookies).await?;
+    let details = load_issue_details(&state, session.user.id, &slug, issue_id).await?;
     let mut context = page_context(&session.user, &session.csrf_token);
     context.insert("slug", &slug);
-    context.insert("project", &project);
-    context.insert("issue", &issue_value);
-    context.insert("events", &event_views);
-    context.insert("comments", &comments);
-    context.insert("activity", &activity);
+    context.insert("project", &details.project);
+    context.insert("issue", &details.issue);
+    context.insert("events", &details.events);
+    context.insert("comments", &details.comments);
+    context.insert("activity", &details.activity);
     render(&state, "issue.html", context)
+}
+
+pub async fn export_issue_markdown(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
+) -> AppResult<Response> {
+    let session = auth::require_session(&state, &cookies).await?;
+    let details = load_issue_details(&state, session.user.id, &slug, issue_id).await?;
+    let markdown = issue_markdown(&details);
+    Ok((
+        [(header::CONTENT_TYPE, "text/markdown; charset=utf-8")],
+        markdown,
+    )
+        .into_response())
 }
 
 pub async fn change_issue_status(
@@ -1238,4 +1279,264 @@ fn format_stacktrace(payload: &Value) -> String {
         }
     }
     lines.join("\n")
+}
+
+fn issue_markdown(details: &IssueDetails) -> String {
+    let issue = &details.issue;
+    let mut out = String::new();
+
+    let title = issue_field(issue, "title");
+    let _ = writeln!(
+        out,
+        "# {}\n",
+        if title.is_empty() {
+            "Untitled issue"
+        } else {
+            &title
+        }
+    );
+
+    let _ = writeln!(
+        out,
+        "- **Project:** {} ({})",
+        details.project.name, details.project.slug
+    );
+    let _ = writeln!(out, "- **Issue ID:** {}", issue_field(issue, "id"));
+    let status = issue_field(issue, "status");
+    if !status.is_empty() {
+        let _ = writeln!(out, "- **Status:** {status}");
+    }
+    let severity = issue_field(issue, "severity");
+    if !severity.is_empty() {
+        let _ = writeln!(out, "- **Severity:** {severity}");
+    }
+    let fingerprint = issue_field(issue, "fingerprint");
+    if !fingerprint.is_empty() {
+        let _ = writeln!(out, "- **Fingerprint:** `{fingerprint}`");
+    }
+    let _ = writeln!(out, "- **Events:** {}", issue_field(issue, "event_count"));
+    if let Some(first_seen) = issue.get("first_seen_at").and_then(Value::as_i64) {
+        let _ = writeln!(out, "- **First seen:** {}", format_unix(first_seen));
+    }
+    if let Some(last_seen) = issue.get("last_seen_at").and_then(Value::as_i64) {
+        let _ = writeln!(out, "- **Last seen:** {}", format_unix(last_seen));
+    }
+    let environment = issue_field(issue, "environment");
+    if !environment.is_empty() {
+        let _ = writeln!(out, "- **Environment:** {environment}");
+    }
+    let release = issue_field(issue, "release");
+    if !release.is_empty() {
+        let _ = writeln!(out, "- **Release:** {release}");
+    }
+    let _ = writeln!(out);
+
+    let message = issue_field(issue, "message");
+    if !message.is_empty() {
+        let _ = writeln!(out, "## Message\n");
+        let _ = writeln!(out, "{message}\n");
+    }
+
+    let stacktrace = issue_field(issue, "stacktrace");
+    if !stacktrace.is_empty() {
+        let fence = fence_for(&stacktrace);
+        let _ = writeln!(out, "## Stack trace\n");
+        let _ = writeln!(out, "{fence}");
+        let _ = writeln!(out, "{stacktrace}");
+        let _ = writeln!(out, "{fence}\n");
+    }
+
+    if !details.events.is_empty() {
+        let _ = writeln!(out, "## Recent events\n");
+        for event in &details.events {
+            let mut meta = event.occurred_at_iso.clone();
+            if !event.environment.is_empty() {
+                meta.push_str(" · ");
+                meta.push_str(&event.environment);
+            }
+            if let Some(release) = event.release.as_deref().filter(|value| !value.is_empty()) {
+                meta.push_str(" · ");
+                meta.push_str(release);
+            }
+            let _ = writeln!(out, "### `{}` — {meta}", event.id);
+            let fence = fence_for(&event.payload_json);
+            let _ = writeln!(out, "{fence}json");
+            let _ = writeln!(out, "{}", event.payload_json);
+            let _ = writeln!(out, "{fence}\n");
+        }
+    }
+
+    if !details.comments.is_empty() {
+        let _ = writeln!(out, "## Comments\n");
+        for comment in &details.comments {
+            let _ = writeln!(
+                out,
+                "### {} — {}",
+                comment.display_name,
+                format_unix(comment.created_at)
+            );
+            let _ = writeln!(out, "{}\n", comment.body);
+        }
+    }
+
+    if !details.activity.is_empty() {
+        let _ = writeln!(out, "## Activity\n");
+        for item in &details.activity {
+            let actor = item.display_name.as_deref().unwrap_or("System");
+            let _ = write!(
+                out,
+                "- **{actor}** {} — {}",
+                item.kind,
+                format_unix(item.created_at)
+            );
+            let details = item.details_json.trim();
+            if !details.is_empty() && details != "{}" && details != "null" {
+                let _ = write!(out, " — details: `{details}`");
+            }
+            let _ = writeln!(out);
+        }
+        let _ = writeln!(out);
+    }
+
+    out
+}
+
+fn issue_field(issue: &Value, key: &str) -> String {
+    issue.get(key).map(json_text).unwrap_or_default()
+}
+
+fn json_text(value: &Value) -> String {
+    match value {
+        Value::Null => String::new(),
+        Value::String(text) => text.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn fence_for(content: &str) -> String {
+    let mut longest = 0usize;
+    let mut current = 0usize;
+    for character in content.chars() {
+        if character == '`' {
+            current += 1;
+            longest = longest.max(current);
+        } else {
+            current = 0;
+        }
+    }
+    "`".repeat(longest.max(2) + 1)
+}
+
+fn format_unix(timestamp: i64) -> String {
+    OffsetDateTime::from_unix_timestamp(timestamp)
+        .ok()
+        .and_then(|value| value.format(&Rfc3339).ok())
+        .unwrap_or_else(|| timestamp.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn details(issue: Value, events: Vec<EventView>) -> IssueDetails {
+        IssueDetails {
+            project: ProjectRow {
+                id: "demo".into(),
+                slug: "demo".into(),
+                name: "Demo".into(),
+                role: "viewer".into(),
+                created_at: 0,
+                description: String::new(),
+                status: "active".into(),
+                ingest_url: "/api/v1/projects/demo/events".into(),
+            },
+            issue,
+            events,
+            comments: vec![CommentRow {
+                id: 1,
+                body: "Investigated on staging.".into(),
+                display_name: "Alice".into(),
+                created_at: 0,
+            }],
+            activity: vec![ActivityRow {
+                id: 1,
+                kind: "status".into(),
+                details_json: r#"{"from":"unresolved","to":"resolved"}"#.into(),
+                display_name: Some("Alice".into()),
+                created_at: 0,
+            }],
+        }
+    }
+
+    fn issue_value() -> Value {
+        json!({
+            "id": 7,
+            "title": "TypeError: boom",
+            "status": "unresolved",
+            "severity": "error",
+            "message": "boom happened",
+            "fingerprint": "abc123",
+            "event_count": 3,
+            "first_seen_at": 0,
+            "last_seen_at": 0,
+            "environment": "production",
+            "release": "1.2.3",
+            "stacktrace": "main at src/main.rs:10",
+        })
+    }
+
+    #[test]
+    fn markdown_includes_all_sections() {
+        let event = EventView {
+            id: "evt-1".into(),
+            payload_json: "{\"message\":\"boom\"}".into(),
+            occurred_at: "2026-09-24T12:00:00Z".into(),
+            occurred_at_iso: "2026-09-24T12:00:00Z".into(),
+            environment: "production".into(),
+            release: Some("1.2.3".into()),
+            user: None,
+            context: String::new(),
+        };
+        let markdown = issue_markdown(&details(issue_value(), vec![event]));
+
+        assert!(markdown.starts_with("# TypeError: boom\n"));
+        assert!(markdown.contains("- **Project:** Demo (demo)"));
+        assert!(markdown.contains("- **Fingerprint:** `abc123`"));
+        assert!(markdown.contains("- **First seen:** 1970-01-01T00:00:00Z"));
+        assert!(markdown.contains("## Message\n\nboom happened"));
+        assert!(markdown.contains("## Stack trace\n\n```\nmain at src/main.rs:10\n```"));
+        assert!(markdown.contains("### `evt-1` — 2026-09-24T12:00:00Z · production · 1.2.3"));
+        assert!(markdown.contains("```json\n{\"message\":\"boom\"}\n```"));
+        assert!(markdown.contains("## Comments\n\n### Alice — 1970-01-01T00:00:00Z"));
+        assert!(markdown.contains("## Activity\n\n- **Alice** status — 1970-01-01T00:00:00Z"));
+        assert!(markdown.contains("details: `{\"from\":\"unresolved\",\"to\":\"resolved\"}`"));
+    }
+
+    #[test]
+    fn markdown_omits_empty_sections() {
+        let issue = json!({
+            "id": 7,
+            "title": "Bare issue",
+            "status": "unresolved",
+            "event_count": 1,
+        });
+        let mut value = details(issue, Vec::new());
+        value.comments.clear();
+        value.activity.clear();
+        let markdown = issue_markdown(&value);
+
+        assert!(markdown.contains("# Bare issue"));
+        assert!(!markdown.contains("## Message"));
+        assert!(!markdown.contains("## Stack trace"));
+        assert!(!markdown.contains("## Recent events"));
+        assert!(!markdown.contains("## Comments"));
+        assert!(!markdown.contains("## Activity"));
+    }
+
+    #[test]
+    fn fence_extends_past_content_backticks() {
+        assert_eq!(fence_for("plain"), "```");
+        assert_eq!(fence_for("a ``` b"), "````");
+        assert_eq!(fence_for("a ```` b"), "`````");
+    }
 }

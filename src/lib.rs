@@ -53,6 +53,10 @@ pub fn router(state: AppState) -> Router {
         .route("/projects/{slug}/keys", post(handlers::create_ingest_key))
         .route("/projects/{slug}/issues/{issue_id}", get(handlers::issue))
         .route(
+            "/projects/{slug}/issues/{issue_id}/export.md",
+            get(handlers::export_issue_markdown),
+        )
+        .route(
             "/projects/{slug}/issues/{issue_id}/status",
             post(handlers::change_issue_status),
         )
