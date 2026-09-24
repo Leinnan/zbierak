@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Set up {{ app_name | default(value="Zbierak") }}{% endblock title %}
+{% block body %}
+<div class="setup-shell">
+  <main class="setup-card">
+    <div class="setup-progress" aria-label="Setup step 1 of 1"><span></span></div>
+    <p class="eyebrow">First run</p>
+    <h1>Create the administrator</h1>
+    <p class="text-secondary mb-4">This account controls projects, retention, and access. You can change these details later.</p>
+    {% if error | default(value="") %}<div class="alert alert-danger" role="alert">{{ error }}</div>{% endif %}
+    <form method="post" action="/bootstrap">
+      <div class="mb-3">
+        <label class="form-label" for="display-name">Display name</label>
+        <input class="form-control" id="display-name" name="display_name" value="{{ display_name | default(value="") }}" maxlength="100" autocomplete="name" required>
+      </div>
+      <div class="mb-3">
+        <label class="form-label" for="email">Email address</label>
+        <input class="form-control" id="email" name="email" type="email" value="{{ email | default(value="") }}" autocomplete="email" required>
+      </div>
+      <div class="mb-3">
+        <label class="form-label" for="password">Password</label>
+        <input class="form-control" id="password" name="password" type="password" minlength="12" autocomplete="new-password" aria-describedby="password-help" required>
+        <div class="form-hint" id="password-help">Use at least 12 characters.</div>
+      </div>
+      <button class="btn btn-primary w-100 mt-2" type="submit">Finish setup</button>
+    </form>
+  </main>
+</div>
+{% endblock body %}

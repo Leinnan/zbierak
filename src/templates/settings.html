@@ -1,0 +1,81 @@
+{% extends "base.html" %}
+{% import "fragments/ui.html" as ui %}
+{% block title %}Notifications · {{ app_name | default(value="Zbierak") }}{% endblock title %}
+{% block content %}
+<header class="page-heading"><div><p class="eyebrow">Settings</p><h1>Notifications</h1><p>Send new issue events to an HTTP webhook or Discord channel.</p></div></header>
+
+<div class="settings-layout">
+  <nav class="settings-nav" aria-label="Notification sections"><a href="#endpoints">Endpoints</a><a href="#add-endpoint">Add endpoint</a></nav>
+  <div class="settings-content">
+    <section class="settings-section" id="endpoints" aria-labelledby="endpoints-title">
+      <div class="section-heading"><div><p class="eyebrow">Destinations</p><h2 id="endpoints-title">Configured endpoints</h2></div><span>{{ notification_endpoints | default(value=[]) | length }}</span></div>
+      <div class="endpoint-list">
+        {% for endpoint in notification_endpoints | default(value=[]) %}
+        <article class="card endpoint-card">
+          <div class="card-body">
+            <div class="endpoint-heading"><div class="endpoint-kind">{{ endpoint.kind | truncate(length=1, end="") | upper }}</div><div><h3>{{ endpoint.name }}</h3><span class="role-badge">{{ endpoint.kind }}</span> <span class="role-badge">{{ endpoint.project_slug }}</span> {% if endpoint.enabled %}<span class="status-pill status-active"><span></span>enabled</span>{% else %}<span class="status-pill"><span></span>disabled</span>{% endif %}</div></div>
+            <code class="endpoint-url">{{ endpoint.url | truncate(length=84) }}</code>
+          </div>
+          {% for project in projects | default(value=[]) %}
+          {% if project.slug == endpoint.project_slug and (project.role == "owner" or project.role == "admin") %}
+          <div class="card-footer">
+            <details class="delete-disclosure">
+              <summary class="btn btn-sm btn-outline-danger">Delete endpoint</summary>
+              <div class="delete-panel">
+                <p>This permanently removes delivery to this destination.</p>
+                <div class="delete-actions">
+                  <form method="post" action="/projects/{{ endpoint.project_slug }}/notifications/webhooks/{{ endpoint.id }}/delete">
+                    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                    <button class="btn btn-sm btn-danger" type="submit" data-confirm="Delete {{ endpoint.name }} from {{ project.name }}?">Confirm deletion</button>
+                  </form>
+                </div>
+              </div>
+            </details>
+          </div>
+          {% endif %}
+          {% endfor %}
+        </article>
+        {% else %}
+        <div class="card">{{ ui::empty(title="No notification endpoints", message="Add a webhook or Discord destination below.") }}</div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="settings-section" id="add-endpoint" aria-labelledby="add-endpoint-title">
+      <div class="section-heading"><div><p class="eyebrow">Delivery</p><h2 id="add-endpoint-title">Add an endpoint</h2></div></div>
+      <div class="project-endpoint-list">
+        {% for project in projects | default(value=[]) %}
+        {% if project.role == "owner" or project.role == "admin" %}
+        <article class="card endpoint-create-card">
+          <div class="card-header"><div><h3 class="card-title">{{ project.name }}</h3><p><code>{{ project.slug }}</code> · {{ project.role }}</p></div></div>
+          <div class="card-body endpoint-form-grid">
+            <details>
+              <summary>Generic webhook</summary>
+              <form method="post" action="/projects/{{ project.slug }}/notifications/webhooks">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="kind" value="webhook">
+                <div><label class="form-label" for="webhook-name-{{ project.id }}">Name</label><input class="form-control" id="webhook-name-{{ project.id }}" name="name" maxlength="100" placeholder="Incident automation" required></div>
+                <div><label class="form-label" for="webhook-url-{{ project.id }}">HTTPS URL</label><input class="form-control" id="webhook-url-{{ project.id }}" name="url" type="url" placeholder="https://hooks.example.com/zbierak" required></div>
+                <div><label class="form-label" for="webhook-secret-{{ project.id }}">Signing secret</label><input class="form-control" id="webhook-secret-{{ project.id }}" name="secret" type="password" minlength="16" maxlength="1024" autocomplete="new-password" required><div class="form-hint">At least 16 characters.</div></div>
+                <button class="btn btn-primary" type="submit">Add webhook</button>
+              </form>
+            </details>
+            <details>
+              <summary>Discord</summary>
+              <form method="post" action="/projects/{{ project.slug }}/notifications/webhooks">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="kind" value="discord"><input type="hidden" name="secret" value="">
+                <div><label class="form-label" for="discord-name-{{ project.id }}">Name</label><input class="form-control" id="discord-name-{{ project.id }}" name="name" maxlength="100" placeholder="Engineering alerts" required></div>
+                <div><label class="form-label" for="discord-url-{{ project.id }}">Discord webhook URL</label><input class="form-control" id="discord-url-{{ project.id }}" name="url" type="url" pattern="https://(discord\.com|discordapp\.com)/.*" placeholder="https://discord.com/api/webhooks/…" required></div>
+                <button class="btn btn-primary" type="submit">Add Discord endpoint</button>
+              </form>
+            </details>
+          </div>
+        </article>
+        {% endif %}
+        {% else %}
+        <div class="alert alert-info">Create a project before configuring notifications.</div>
+        {% endfor %}
+      </div>
+    </section>
+  </div>
+</div>
+{% endblock content %}

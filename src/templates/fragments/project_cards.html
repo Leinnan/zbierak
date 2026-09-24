@@ -1,0 +1,24 @@
+{% import "fragments/ui.html" as ui %}
+<div id="project-list" class="project-grid">
+  {% for project in projects | default(value=[]) %}
+  <article class="card project-card">
+    <a class="project-card-link" href="/projects/{{ project.slug }}" aria-label="Open {{ project.name }}"></a>
+    <div class="card-body">
+      <div class="d-flex align-items-start justify-content-between gap-3">
+        <div>
+          <div class="project-mark" aria-hidden="true">{{ project.name | default(value="P") | truncate(length=1, end="") | upper }}</div>
+          <h2 class="card-title mt-3 mb-1">{{ project.name | default(value="Untitled project") }}</h2>
+          <p class="text-secondary mb-0"><code>{{ project.slug }}</code></p>
+        </div>
+        <span class="role-badge">{{ project.role }}</span>
+      </div>
+    </div>
+    <div class="card-footer project-stats">
+      <span>Created <time class="js-local-time" data-unix="{{ project.created_at }}">{{ project.created_at }}</time></span>
+      <span class="text-secondary">Project #{{ project.id }}</span>
+    </div>
+  </article>
+  {% else %}
+  <div class="card empty-card">{{ ui::empty(title="No projects yet", message="Create a project to receive your first error event.") }}</div>
+  {% endfor %}
+</div>

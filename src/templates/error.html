@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}{{ status_code | default(value=500) }} · {{ app_name | default(value="Zbierak") }}{% endblock title %}
+{% block body %}
+<main id="main-content">
+<section class="error-shell">
+  <div class="error-code" aria-hidden="true">{{ status_code | default(value=500) }}</div>
+  <p class="eyebrow">Request interrupted</p>
+  <h1>{{ heading | default(value="Something went wrong") }}</h1>
+  <p>{{ message | default(value="The request could not be completed. Try again, or return to the dashboard.") }}</p>
+  <div class="error-actions"><a class="btn btn-primary" href="{{ back_url | default(value="/projects") }}">Return to dashboard</a><button class="btn btn-outline-secondary" type="button" data-history-back>Go back</button></div>
+  {% if request_id | default(value="") %}<p class="request-id">Request ID <code>{{ request_id }}</code></p>{% endif %}
+</section>
+</main>
+{% endblock body %}

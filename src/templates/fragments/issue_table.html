@@ -1,0 +1,35 @@
+{% import "fragments/ui.html" as ui %}
+<div id="issue-list" class="card">
+  <div class="table-responsive">
+    <table class="table table-vcenter card-table issue-table">
+      <thead>
+        <tr>
+          <th>Issue</th>
+          <th>Status</th>
+          <th class="text-end">Events</th>
+          <th>Last seen</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for issue in issues | default(value=[]) %}
+        {% set issue_status = issue.status | default(value="unresolved") %}
+        <tr>
+          <td>
+            <a class="issue-link" href="/projects/{{ project.slug }}/issues/{{ issue.id }}">
+              <strong>{{ issue.title | default(value="Unhandled error") }}</strong>
+              <span>First seen <time class="js-local-time" data-unix="{{ issue.first_seen_at }}">{{ issue.first_seen_at }}</time></span>
+            </a>
+          </td>
+          <td>{{ ui::status(value=issue_status) }}</td>
+          <td class="text-end tabular-nums">{{ issue.event_count | default(value=1) }}</td>
+          <td>
+            <time class="js-local-time" data-unix="{{ issue.last_seen_at }}">{{ issue.last_seen_at }}</time>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="4">{{ ui::empty(title="No issues yet", message="Send an event with an ingest key to begin tracking failures.") }}</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>

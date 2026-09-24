@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% import "fragments/ui.html" as ui %}
+{% block title %}Projects · {{ app_name | default(value="Zbierak") }}{% endblock title %}
+{% block content %}
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">Overview</p>
+    <h1>Projects</h1>
+    <p>Monitor the services that matter, without the noise.</p>
+  </div>
+  <button class="btn btn-primary" type="button" data-bs-toggle="modal" data-bs-target="#new-project">New project</button>
+</header>
+
+{% include "fragments/project_cards.html" %}
+
+<div class="modal modal-blur fade" id="new-project" tabindex="-1" aria-labelledby="new-project-title" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered">
+    <div class="modal-content">
+      <form method="post" action="/projects">
+        <div class="modal-header"><h2 class="modal-title" id="new-project-title">Create project</h2><button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button></div>
+        <div class="modal-body">
+          {% if csrf_token | default(value="") %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
+          <div class="mb-3"><label class="form-label" for="project-name">Name</label><input class="form-control" id="project-name" name="name" required maxlength="100"></div>
+          <div><label class="form-label" for="project-slug">Slug</label><div class="input-group"><span class="input-group-text">/projects/</span><input class="form-control" id="project-slug" name="slug" required minlength="2" maxlength="50" pattern="[a-z0-9](?:[a-z0-9-]*[a-z0-9])?" aria-describedby="slug-help"></div><div class="form-hint" id="slug-help">2–50 lowercase letters, digits, or hyphens.</div></div>
+        </div>
+        <div class="modal-footer"><button class="btn btn-ghost-secondary" type="button" data-bs-dismiss="modal">Cancel</button><button class="btn btn-primary" type="submit">Create project</button></div>
+      </form>
+    </div>
+  </div>
+</div>
+{% endblock content %}

@@ -1,0 +1,22 @@
+[package]
+name = "zbierak-sdk"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Runtime-independent Rust SDK for Zbierak"
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+serde_json = "1"
+thiserror = "2"
+time = { version = "0.3", features = ["formatting"] }
+tracing = "0.1"
+tracing-subscriber = "0.3"
+uuid = { version = "1", features = ["v4"] }
+zbierak-protocol = { path = "../zbierak-protocol" }
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints.rust]
+unsafe_code = "forbid"

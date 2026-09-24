@@ -1,0 +1,21 @@
+{% macro severity(value="error") %}
+{% set level = value | default(value="error") | lower %}
+<span class="severity severity-{{ level }}">{{ level }}</span>
+{% endmacro severity %}
+
+{% macro status(value="open") %}
+{% set state = value | default(value="open") | lower %}
+<span class="status-pill status-{{ state }}"><span aria-hidden="true"></span>{{ state }}</span>
+{% endmacro status %}
+
+{% macro empty(title, message) %}
+<div class="empty-state">
+  <div class="empty-state-mark" aria-hidden="true">∅</div>
+  <h3>{{ title }}</h3>
+  <p>{{ message }}</p>
+</div>
+{% endmacro empty %}
+
+{% macro csrf(token="") %}
+{% if token | default(value="") %}<input type="hidden" name="csrf_token" value="{{ token }}">{% endif %}
+{% endmacro csrf %}

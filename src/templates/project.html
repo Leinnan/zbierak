@@ -1,0 +1,99 @@
+{% extends "base.html" %}
+{% import "fragments/ui.html" as ui %}
+{% block title %}{{ project.name }} · {{ app_name | default(value="Zbierak") }}{% endblock title %}
+{% block content %}
+<nav class="breadcrumb-line" aria-label="Breadcrumb"><a href="/projects">Projects</a><span aria-hidden="true">/</span><span aria-current="page">{{ project.name }}</span></nav>
+
+<header class="page-heading project-heading">
+  <div>
+    <div class="d-flex flex-wrap align-items-center gap-2"><h1>{{ project.name }}</h1><span class="role-badge">{{ project.role }}</span> {{ ui::status(value=project.status) }}</div>
+    <p>{% if project.description %}{{ project.description }} · {% endif %}<code>{{ project.slug }}</code> · Created <time class="js-local-time" data-unix="{{ project.created_at }}">{{ project.created_at }}</time></p>
+  </div>
+  <a class="btn btn-outline-secondary" href="#access">Manage access</a>
+</header>
+
+{% if ingest_key | default(value="") %}
+<section class="key-reveal" role="status" aria-labelledby="new-key-title">
+  <div>
+    <p class="eyebrow">Created successfully</p>
+    <h2 id="new-key-title">Copy your ingest key now</h2>
+    <p>This secret is shown once. Store it somewhere secure before leaving this page.</p>
+  </div>
+  <div class="secret-value"><code id="new-ingest-key">{{ ingest_key }}</code><button class="btn btn-light btn-sm" type="button" data-copy-target="#new-ingest-key">Copy key</button></div>
+</section>
+{% endif %}
+
+<section class="ingest-card" aria-labelledby="ingest-title">
+  <div><p class="eyebrow" id="ingest-title">Events API</p><code>{{ project.ingest_url }}</code></div>
+  <button class="btn btn-outline-secondary btn-sm" type="button" data-copy="{{ project.ingest_url }}">Copy path</button>
+</section>
+
+<section aria-labelledby="issues-title">
+  <div class="section-heading"><div><p class="eyebrow">Error stream</p><h2 id="issues-title">Issues</h2></div><span>Latest 100</span></div>
+  {% include "fragments/issue_table.html" %}
+</section>
+
+<section class="management-section" id="access" aria-labelledby="access-title">
+  <div class="section-heading"><div><p class="eyebrow">Project administration</p><h2 id="access-title">Access and ingestion</h2></div></div>
+  <div class="management-grid">
+    <article class="card management-card">
+      <div class="card-header"><div><h3 class="card-title">Ingest keys</h3><p>Bearer tokens accepted by this project’s events API.</p></div></div>
+      <div class="list-group list-group-flush">
+        {% for key in ingest_keys | default(value=[]) %}
+        <div class="list-group-item management-row">
+          <div><strong>{{ key.name }}</strong><small><code>{{ key.key_prefix }}…</code></small></div>
+          <div class="text-end"><small>Created <time class="js-local-time" data-unix="{{ key.created_at }}">{{ key.created_at }}</time></small><small>{% if key.last_used_at %}Last used <time class="js-local-time" data-unix="{{ key.last_used_at }}">{{ key.last_used_at }}</time>{% else %}Never used{% endif %}</small></div>
+        </div>
+        {% else %}
+        <div class="list-group-item text-secondary">No active ingest keys.</div>
+        {% endfor %}
+      </div>
+      {% if project.role == "owner" or project.role == "admin" %}
+      <div class="card-footer">
+        <form class="compact-form" method="post" action="/projects/{{ project.slug }}/keys">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div><label class="form-label" for="key-name">Key name</label><input class="form-control" id="key-name" name="name" maxlength="100" placeholder="Production API" required></div>
+          <button class="btn btn-primary" type="submit">Create key</button>
+        </form>
+      </div>
+      {% endif %}
+    </article>
+
+    <article class="card management-card">
+      <div class="card-header"><div><h3 class="card-title">Members</h3><p>People who can inspect and manage this project.</p></div></div>
+      <div class="list-group list-group-flush">
+        {% for member in members | default(value=[]) %}
+        <div class="list-group-item management-row"><div><strong>{{ member.display_name }}</strong><small>{{ member.email }}</small></div><span class="role-badge">{{ member.role }}</span></div>
+        {% else %}
+        <div class="list-group-item text-secondary">No members were returned.</div>
+        {% endfor %}
+      </div>
+      {% if project.role == "owner" or project.role == "admin" %}
+      <div class="card-footer">
+        <details class="management-disclosure">
+          <summary class="btn btn-outline-secondary">Add or update member</summary>
+          <form class="member-form" method="post" action="/projects/{{ project.slug }}/members">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><label class="form-label" for="member-name">Display name</label><input class="form-control" id="member-name" name="display_name" maxlength="100" required></div>
+            <div><label class="form-label" for="member-email">Email</label><input class="form-control" id="member-email" name="email" type="email" maxlength="254" required></div>
+            <div><label class="form-label" for="member-password">Initial password</label><input class="form-control" id="member-password" name="password" type="password" minlength="12" maxlength="1024" aria-describedby="member-password-help"><div class="form-hint" id="member-password-help">Required only when this email does not already have an account.</div></div>
+            <div><label class="form-label" for="member-role">Project role</label><select class="form-select" id="member-role" name="role">{% if project.role == "owner" %}<option value="owner">Owner</option><option value="admin">Admin</option>{% endif %}<option value="developer">Developer</option><option value="viewer">Viewer</option></select></div>
+            <button class="btn btn-primary" type="submit">Save member</button>
+          </form>
+        </details>
+      </div>
+      {% endif %}
+    </article>
+
+    <article class="card management-card">
+      <div class="card-header"><div><h3 class="card-title">Notifications</h3><p>Destinations receiving new issue events.</p></div></div>
+      <div class="list-group list-group-flush">
+        {% for endpoint in notification_endpoints | default(value=[]) %}
+        <div class="list-group-item management-row"><div><strong>{{ endpoint.name }}</strong><small>{{ endpoint.kind }} · {{ endpoint.url | truncate(length=56) }}</small></div>{% if endpoint.enabled %}<span class="status-pill status-active"><span></span>enabled</span>{% else %}<span class="status-pill"><span></span>disabled</span>{% endif %}</div>
+        {% else %}<div class="list-group-item text-secondary">No notification endpoints.</div>{% endfor %}
+      </div>
+      <div class="card-footer"><a class="btn btn-outline-secondary" href="/settings#add-endpoint">Manage notifications</a></div>
+    </article>
+  </div>
+</section>
+{% endblock content %}

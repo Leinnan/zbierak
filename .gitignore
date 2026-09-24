@@ -1,0 +1,8 @@
+/target
+/.env
+/data/
+/backups/
+/.zbierak-spool/
+*.db
+*.db-shm
+*.db-wal

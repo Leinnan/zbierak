@@ -1,0 +1,14 @@
+{% if project.role != "viewer" %}
+<form class="status-form" method="post" action="/projects/{{ slug }}/issues/{{ issue.id }}/status" aria-label="Change issue status">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label class="form-label" for="issue-status">Status</label>
+  <div class="input-group">
+    <select class="form-select" id="issue-status" name="status">
+      <option value="unresolved" {% if issue.status == "unresolved" %}selected{% endif %}>Unresolved</option>
+      <option value="resolved" {% if issue.status == "resolved" %}selected{% endif %}>Resolved</option>
+      <option value="ignored" {% if issue.status == "ignored" %}selected{% endif %}>Ignored</option>
+    </select>
+    <button class="btn btn-primary" type="submit">Update</button>
+  </div>
+</form>
+{% endif %}

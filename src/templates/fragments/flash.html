@@ -1,0 +1,6 @@
+{% if flash_message | default(value="") %}
+<div class="alert alert-{{ flash_type | default(value="info") }} alert-dismissible" role="status" data-flash>
+  <div>{{ flash_message }}</div>
+  <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Dismiss message"></button>
+</div>
+{% endif %}

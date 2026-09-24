@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% import "fragments/ui.html" as ui %}
+{% block title %}{{ issue.title }} · {{ slug }}{% endblock title %}
+{% block content %}
+<nav class="breadcrumb-line" aria-label="Breadcrumb"><a href="/projects">Projects</a><span>/</span><a href="/projects/{{ slug }}">{{ project.name }}</a><span>/</span><span aria-current="page">Issue {{ issue.id }}</span></nav>
+
+<header class="issue-heading">
+  <div>
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-2">{% if issue.severity | default(value="") %}{{ ui::severity(value=issue.severity) }}{% endif %} {{ ui::status(value=issue.status) }} <span class="fingerprint">{{ issue.fingerprint }}</span></div>
+    <h1>{{ issue.title }}</h1>
+    <p>{% if issue.message | default(value="") %}{{ issue.message }}{% else %}{{ issue.event_count }} event{% if issue.event_count != 1 %}s{% endif %} recorded for this issue.{% endif %}</p>
+  </div>
+  {% include "fragments/issue_actions.html" %}
+</header>
+
+<div class="issue-layout">
+  <div class="issue-primary">
+    {% if issue.stacktrace | default(value="") %}
+    <section class="card stack-card" aria-labelledby="stack-title">
+      <div class="card-header"><div><p class="eyebrow">Latest occurrence</p><h2 class="card-title" id="stack-title">Stack trace</h2></div><button class="btn btn-sm btn-outline-secondary" type="button" data-copy-target="#stack-trace">Copy stack</button></div>
+      <div class="stack-toolbar"><button type="button" class="stack-toggle is-active" data-stack-mode="app">Application frames</button><button type="button" class="stack-toggle" data-stack-mode="all">All frames</button></div>
+      <pre id="stack-trace" class="stack-trace" tabindex="0"><code>{{ issue.stacktrace }}</code></pre>
+    </section>
+    {% endif %}
+    <section class="event-section" aria-labelledby="events-title">
+      <div class="section-heading"><div><p class="eyebrow">Occurrences</p><h2 id="events-title">Recent events</h2></div><span>Latest {{ events | default(value=[]) | length }} of {{ issue.event_count }}</span></div>
+      <div class="event-list">
+        {% for event in events | default(value=[]) %}
+        <details class="card event-card" {% if loop.first %}open{% endif %}>
+          <summary><span class="event-dot" aria-hidden="true"></span><span><strong><time class="js-local-time" datetime="{{ event.occurred_at_iso }}">{{ event.occurred_at }}</time></strong><small>{{ event.environment }}{% if event.release %} · {{ event.release }}{% endif %} · <code>{{ event.id }}</code></small></span><span class="event-chevron" aria-hidden="true">+</span></summary>
+          <div class="event-body">
+            <div class="payload-heading"><h3>Event payload</h3><button class="btn btn-sm btn-outline-secondary" type="button" data-copy-target="#event-{{ loop.index }}">Copy JSON</button></div>
+            <pre class="context-json" tabindex="0"><code id="event-{{ loop.index }}" class="js-json">{{ event.payload_json }}</code></pre>
+          </div>
+        </details>
+        {% else %}
+        <div class="card empty-card">{{ ui::empty(title="No events", message="Occurrence details are not available for this issue.") }}</div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="comments-section" aria-labelledby="comments-title">
+      <div class="section-heading"><div><p class="eyebrow">Investigation log</p><h2 id="comments-title">Comments</h2></div><span>{{ comments | default(value=[]) | length }}</span></div>
+      <div class="comment-list">
+        {% for comment in comments | default(value=[]) %}
+        <article class="card comment-card">
+          <div class="comment-meta"><span class="avatar avatar-sm">{{ comment.display_name | truncate(length=1, end="") | upper }}</span><div><strong>{{ comment.display_name }}</strong><time class="js-local-time" data-unix="{{ comment.created_at }}">{{ comment.created_at }}</time></div></div>
+          <p>{{ comment.body }}</p>
+        </article>
+        {% else %}
+        <p class="text-secondary">No comments yet. Record context or handoff notes below.</p>
+        {% endfor %}
+      </div>
+      {% if project.role != "viewer" %}<form class="card comment-form" method="post" action="/projects/{{ slug }}/issues/{{ issue.id }}/comments">
+        <div class="card-body">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label class="form-label" for="comment-body">Add a comment</label>
+          <textarea class="form-control" id="comment-body" name="body" rows="4" maxlength="10000" placeholder="What did you find?" required></textarea>
+        </div>
+        <div class="card-footer d-flex justify-content-end"><button class="btn btn-primary" type="submit">Post comment</button></div>
+      </form>{% endif %}
+    </section>
+  </div>
+
+  <aside class="issue-sidebar" aria-label="Issue details">
+    <section class="card"><div class="card-body"><h2 class="detail-title">Issue details</h2><dl class="detail-list"><div><dt>Status</dt><dd>{{ issue.status }}</dd></div><div><dt>First seen</dt><dd><time class="js-local-time" data-unix="{{ issue.first_seen_at }}">{{ issue.first_seen_at }}</time></dd></div><div><dt>Last seen</dt><dd><time class="js-local-time" data-unix="{{ issue.last_seen_at }}">{{ issue.last_seen_at }}</time></dd></div><div><dt>Events</dt><dd>{{ issue.event_count }}</dd></div>{% if issue.environment | default(value="") %}<div><dt>Environment</dt><dd>{{ issue.environment }}</dd></div>{% endif %}{% if issue.release | default(value="") %}<div><dt>Release</dt><dd>{{ issue.release }}</dd></div>{% endif %}</dl></div></section>
+    {% if activity | default(value=[]) | length > 0 %}<section class="card activity-card"><div class="card-body"><h2 class="detail-title">Activity</h2><ol>{% for item in activity %}<li><strong>{{ item.display_name | default(value="System") }}</strong> {{ item.kind }}<time class="js-local-time" data-unix="{{ item.created_at }}">{{ item.created_at }}</time></li>{% endfor %}</ol></div></section>{% endif %}
+  </aside>
+</div>
+{% endblock content %}

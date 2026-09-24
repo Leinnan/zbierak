@@ -1,0 +1,36 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zbierak:local
+    restart: unless-stopped
+    init: true
+    environment:
+      ZBIERAK_LISTEN_ADDR: ${ZBIERAK_LISTEN_ADDR:-0.0.0.0:3000}
+      ZBIERAK_DATABASE_URL: ${ZBIERAK_DATABASE_URL:-sqlite:///data/zbierak.db?mode=rwc}
+      ZBIERAK_COOKIE_SECURE: ${ZBIERAK_COOKIE_SECURE:-false}
+      ZBIERAK_SESSION_DAYS: ${ZBIERAK_SESSION_DAYS:-30}
+      ZBIERAK_STATIC_DIR: ${ZBIERAK_STATIC_DIR:-/app/static}
+      ZBIERAK_TEMPLATE_DIR: ${ZBIERAK_TEMPLATE_DIR:-/app/templates}
+      RUST_LOG: ${RUST_LOG:-zbierak=info,tower_http=info}
+    ports:
+      - "${ZBIERAK_PUBLISH_ADDRESS:-127.0.0.1}:3000:3000"
+    volumes:
+      - zbierak-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "--show-error", "http://127.0.0.1:3000/ready"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+volumes:
+  zbierak-data:
