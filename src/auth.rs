@@ -16,6 +16,72 @@ use tower_cookies::{Cookie, Cookies, cookie::SameSite};
 use crate::{AppError, AppResult, AppState};
 
 pub const SESSION_COOKIE: &str = "zbierak_session";
+pub const LOGIN_CSRF_COOKIE: &str = "zbierak_login_csrf";
+const LOGIN_FAILURE_LIMIT: i64 = 5;
+const LOGIN_LOCK_SECONDS: i64 = 900;
+
+fn now() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
+}
+
+/// Login throttling is keyed by the SHA-256 of the lowercased email so the raw
+/// address never rests in the throttle table.
+fn login_identity(email: &str) -> String {
+    token_hash(&email.trim().to_ascii_lowercase())
+}
+
+/// Returns true when login attempts for this email are currently locked out.
+pub async fn login_locked(state: &AppState, email: &str) -> AppResult<bool> {
+    let locked_until: Option<Option<i64>> =
+        sqlx::query_scalar("SELECT locked_until FROM login_throttle WHERE identity_hash = ?")
+            .bind(login_identity(email))
+            .fetch_optional(&state.db)
+            .await?;
+    Ok(locked_until.flatten().is_some_and(|until| until > now()))
+}
+
+/// Records a failed login attempt. After [`LOGIN_FAILURE_LIMIT`] consecutive
+/// failures the identity is locked out for [`LOGIN_LOCK_SECONDS`].
+pub async fn login_failure(state: &AppState, email: &str) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO login_throttle (identity_hash, failures, locked_until, updated_at)
+         VALUES (?, 1, NULL, unixepoch())
+         ON CONFLICT(identity_hash) DO UPDATE SET
+           failures = CASE
+             WHEN login_throttle.locked_until IS NOT NULL AND login_throttle.locked_until > unixepoch()
+               THEN login_throttle.failures
+             WHEN login_throttle.locked_until IS NOT NULL
+               THEN 1
+             ELSE login_throttle.failures + 1 END,
+           locked_until = CASE
+             WHEN login_throttle.locked_until IS NOT NULL AND login_throttle.locked_until > unixepoch()
+               THEN login_throttle.locked_until
+             WHEN login_throttle.locked_until IS NOT NULL
+               THEN NULL
+             WHEN login_throttle.failures + 1 >= ?
+               THEN unixepoch() + ?
+             ELSE NULL END,
+           updated_at = unixepoch()",
+    )
+    .bind(login_identity(email))
+    .bind(LOGIN_FAILURE_LIMIT)
+    .bind(LOGIN_LOCK_SECONDS)
+    .execute(&state.db)
+    .await?;
+    Ok(())
+}
+
+/// Clears throttling state after a successful login.
+pub async fn login_success(state: &AppState, email: &str) -> AppResult<()> {
+    sqlx::query("DELETE FROM login_throttle WHERE identity_hash = ?")
+        .bind(login_identity(email))
+        .execute(&state.db)
+        .await?;
+    Ok(())
+}
 
 #[derive(Debug, Clone, Serialize, FromRow)]
 pub struct User {

@@ -16,9 +16,14 @@ separates it from potential future work.
   comments, notification endpoints, an outbox, and reserved release/artifact
   metadata tables.
 - `GET /health` returns `ok` without checking dependencies. `GET /ready` executes
-  `SELECT 1` and returns `ready` when SQLite responds.
+  `SELECT 1` and returns `ready` when SQLite responds; both respond with JSON
+  error bodies on failure.
 - `RUST_LOG` controls structured application logging through
   `tracing-subscriber`.
+- With the `docs` feature enabled, the service serves an OpenAPI document at
+  `/api-docs/openapi.json` and a Scalar API browser at `/scalar` backed by a
+  vendored Scalar bundle. These routes are unauthenticated and carry a relaxed
+  content security policy.
 
 ### Authentication And Authorization
 
@@ -30,8 +35,14 @@ separates it from potential future work.
   user association, CSRF token, and expiry.
 - Session cookies are HTTP-only, `SameSite=Lax`, optionally `Secure`, and expire
   after `ZBIERAK_SESSION_DAYS` (1 through 365 days).
-- Implemented state-changing authenticated handlers verify the session CSRF
-  token.
+- The login form carries a double-submit CSRF token backed by an anonymous
+  cookie. Failed logins are throttled per identity: five consecutive failures
+  lock the account for fifteen minutes; successful logins reset the counter.
+- Users can change their password from the settings page (which signs out all
+  other sessions), list active sessions, revoke individual sessions, and sign
+  out everywhere except the current browser.
+- Logins, failures, and every privileged mutation are recorded in an
+  `audit_log` table.
 - Responses include a self-only Content Security Policy, MIME-sniffing
   protection, same-origin referrer policy, and a restrictive permissions policy.
 - Project roles are `owner`, `admin`, `developer`, and `viewer`, ordered by
@@ -46,7 +57,8 @@ separates it from potential future work.
 - Owners and admins can add a new password user or attach an existing user to a
   project. Owner/admin assignment and modification require an owner.
 - Ingestion keys are random `zbk_` tokens. The database stores a SHA-256 hash and
-  display prefix rather than the full key.
+  display prefix rather than the full key. Owners and admins can revoke keys
+  from the project page; revoked keys immediately stop accepting events.
 - Events are grouped into issues with BLAKE3 fingerprints. An explicit
   `fingerprint` array controls grouping; otherwise selected error/message and
   frame fields are collected. A new event reopens a resolved issue but does not
@@ -57,6 +69,11 @@ separates it from potential future work.
 - Status changes and comments are recorded in an issue activity stream. An event
   matching a resolved issue reopens it and records a system regression entry;
   ignored issues are not automatically reopened.
+- Any issue can be exported as Markdown via
+  `GET /projects/{slug}/issues/{issue_id}/export.md`, including title, status,
+  event metadata, and the full activity stream.
+- Projects carry an `active`/`archived` status column reserved for future use;
+  no archive flow exists yet.
 
 ### Event Protocol And Ingestion
 
@@ -71,12 +88,15 @@ separates it from potential future work.
   platform, top-level and error stack frames, breadcrumbs, tags, contexts, user
   data, and explicit fingerprint components.
 - Validation bounds message length, tags, contexts, breadcrumbs, and fingerprint
-  components. The protocol describes timestamps as RFC 3339, but current
-  validation only checks that the timestamp is nonempty and at most 64 bytes.
-- Producer `event_id` is unique within a project. Repeated IDs return the existing
-  issue and fingerprint without changing issue counts or creating outbox work.
+  components. Timestamps must parse as RFC 3339 and fall between years 2000 and
+  2100, in addition to a 64-byte length limit.
+- Producer `event_id` is unique within a project. Repeating an ID with identical
+  content returns the existing issue and fingerprint without changing issue
+  counts or creating outbox work. Reusing an ID with different content fails
+  with HTTP 409 and an `event_id_conflict` code.
 - Successful new and duplicate ingestion returns HTTP 202 with producer event
-  ID, issue ID, fingerprint, and a `duplicate` boolean.
+  ID, issue ID, fingerprint, and a `duplicate` boolean. Oversized bodies return
+  413 `payload_too_large`.
 
 ### Rust SDK
 
@@ -96,6 +116,17 @@ separates it from potential future work.
 - Admins and owners can configure generic HTTP/HTTPS webhooks and Discord
   webhooks. Discord destinations are restricted to HTTPS URLs on `discord.com`
   or `discordapp.com`.
+- Webhook destinations are validated against the public internet both when
+  created and at every delivery: DNS is resolved and the client is pinned to
+  only globally routable addresses, blocking loopback, private-network,
+  link-local (including cloud metadata), CGNAT, and documentation ranges as
+  well as DNS rebinding. Redirects are never followed; a 3xx response counts as
+  a failed delivery.
+- Webhook signing secrets are encrypted at rest with ChaCha20-Poly1305 under
+  `ZBIERAK_SECRET_KEY` and stored as versioned ciphertext. Creating a
+  webhook-kind endpoint requires that key; legacy plaintext rows keep
+  delivering with a logged warning. Rotation of stored secrets is manual
+  (re-create the endpoint).
 - A newly created issue or regression inserts one durable outbox row per enabled
   project endpoint in the same database transaction as event storage. Ordinary
   occurrences and idempotent duplicates do not notify.
@@ -105,7 +136,8 @@ separates it from potential future work.
   HMAC-SHA256 digest prefixed with `sha256=`.
 - Failed deliveries use exponential delays capped at one hour through the first
   attempts and one day from attempt 12 onward. They remain pending indefinitely;
-  there is no terminal failure state or operator replay UI.
+  there is no terminal failure state or operator replay UI. Claimed rows carry a
+  60-second lease so deliveries interrupted by a crash are retried.
 
 ### Packaging And Frontend Assets
 
@@ -115,12 +147,15 @@ separates it from potential future work.
   static files at `/app/static`, uses `/app` as its working directory, and runs
   as UID/GID `10001`.
 - The image configures the namespaced listener, database, cookie, session,
-  template, and static-directory variables read directly by the binary.
+  template, static-directory, and webhook-secret-key variables read directly by
+  the binary.
 - Compose persists `/data`, publishes to loopback by default, uses a read-only
   root filesystem and writable `/tmp`, drops all capabilities, and prevents
   privilege escalation.
 - Tabler 1.4.0 and htmx 2.0.7 are vendored under `src/static/vendor`. The UI uses
   local files only, and `src/static/THIRD_PARTY_NOTICES` carries their notices.
+- The justfile provides manual `backup` and `restore` recipes that archive and
+  restore the data volume while the service is stopped.
 
 ## Current Limitations
 
@@ -132,17 +167,17 @@ separates it from potential future work.
   `ZBIERAK_BIND` and `DATABASE_URL` are legacy fallbacks. Template and static
   paths are configurable but assets are not embedded in the executable.
 - `Cargo.lock` is committed and the container uses a locked release build.
-- No rolling upgrade, downgrade migration, automated backup, replication, or
-  disaster-recovery mechanism is built into the service.
+- No rolling upgrade, downgrade migration, automated in-service backup,
+  replication, or disaster-recovery mechanism is built into the service; the
+  justfile recipes are manual and require downtime.
 
 ### API And Event Processing
 
-- Idempotency is scoped to `(project, event_id)`. Reusing an ID for different
-  content in the same project returns the first stored result rather than
-  reporting a payload conflict.
-- API failures use escaped HTML error pages rather than the protocol crate's
-  `ApiErrorResponse` JSON shape.
-- Timestamp strings are not parsed or semantically validated by the server.
+- Idempotency compares a stored SHA-256 body hash; events ingested before the
+  hash column existed carry no hash and keep the legacy duplicate behavior.
+- Only the ingestion and readiness endpoints return JSON errors (in the
+  protocol crate's `ApiErrorResponse` shape). Every other failure, including UI
+  handlers, renders escaped HTML error pages.
 - Ingestion performs storage, issue update, and outbox insertion synchronously in
   one request transaction. There is no admission queue or backpressure metric.
 - Events are grouped and displayed as received. There is no Linux ELF/DWARF
@@ -152,21 +187,17 @@ separates it from potential future work.
 
 ### UI And Administration
 
-- There are no UI actions for deleting projects/users, removing memberships,
-  revoking ingestion keys, changing passwords, ending other sessions, or
-  rotating credentials.
+- There are no UI actions for deleting projects/users, removing memberships, or
+  rotating a key in one step (revoke plus create is the current rotation path).
 - User creation is coupled to adding a project member. There is no installation-
   wide user administration or password reset flow.
-- Login has no CSRF token, throttling, lockout, second factor, or external
-  identity provider integration.
+- Login has no second factor and no external identity provider integration.
 
 ### Notifications And Network Security
 
-- Generic webhook URLs accept arbitrary HTTP/HTTPS hosts. The service does not
-  block loopback, link-local, private-network, or cloud-metadata destinations and
-  does not constrain redirects, leaving SSRF risk for privileged administrators.
-- Generic webhook secrets and destination URLs are stored in plaintext in
-  SQLite. There is no encryption-at-rest key or secret rotation flow.
+- Destination URLs remain plaintext in SQLite; only signing secrets are
+  encrypted. Changing `ZBIERAK_SECRET_KEY` invalidates stored ciphertexts
+  until endpoints are re-created; there is no automated key-rotation flow.
 - All enabled endpoints receive every new-issue and regression notification.
   There are no severity/environment filters, grouping windows, quiet hours,
   muting, rate budgets, custom templates, or endpoint-specific event selection.
@@ -197,15 +228,20 @@ operational risk before product breadth.
 
 ### Priority 0: Correctness And Security
 
-- Detect conflicting payload reuse for an existing project/event ID.
-- Return documented JSON API errors and parse RFC 3339 timestamps strictly.
+- Detect conflicting payload reuse for an existing project/event ID. DONE.
+- Parse RFC 3339 timestamps strictly. DONE. Returning documented JSON API
+  errors remains open for routes beyond ingestion and readiness.
 - Add request tracing, explicit body/concurrency limits, proxy-aware client IP
-  handling, rate limiting, and integration tests for every API status.
+  handling, rate limiting. Integration tests now cover every ingestion API
+  status. Login throttling is in place; ingestion-path rate limiting is not.
 - Add ingestion-key revocation/rotation, password changes/resets, session
   revocation, login CSRF protection, login throttling, and an audit log.
+  DONE, except password reset without a current password.
 - Prevent webhook SSRF with destination policy, DNS/IP validation, redirect
-  restrictions, and deployment-level egress controls.
-- Encrypt webhook secrets with a rotatable external key.
+  restrictions, and deployment-level egress controls. DONE in the service;
+  deployment egress controls remain an operator task.
+- Encrypt webhook secrets with a rotatable external key. DONE for writing;
+  automated rotation of stored secrets is still open.
 
 ### Priority 1: Operability And Data Lifecycle
 

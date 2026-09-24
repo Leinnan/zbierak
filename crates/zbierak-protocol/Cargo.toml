@@ -8,6 +8,7 @@ description = "Wire types shared by Zbierak servers and clients"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+time = { version = "0.3.55", features = ["parsing"] }
 utoipa = { version = "6.0.0", optional = true }
 
 [lints.rust]

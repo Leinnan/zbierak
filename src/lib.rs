@@ -1,13 +1,18 @@
 mod api_error;
+mod audit;
 mod auth;
 mod config;
 mod db;
 mod error;
 mod fingerprint;
 mod handlers;
+mod net_policy;
+pub use net_policy::{BoxResolveFuture, Resolver, SystemResolver, is_allowed_destination};
 #[cfg(feature = "docs")]
 mod openapi;
 mod outbox;
+mod secrets;
+pub use secrets::{decrypt, encrypt, generate_key, parse_key};
 
 use std::{sync::Arc, time::Duration};
 
@@ -24,6 +29,7 @@ use tera::Tera;
 use tokio::{net::TcpListener, sync::watch};
 use tower_cookies::CookieManagerLayer;
 
+pub use auth::{hash_password, token_hash, verify_password};
 pub use config::Config;
 pub use error::{AppError, AppResult};
 
@@ -33,6 +39,7 @@ pub struct AppState {
     pub db: SqlitePool,
     pub templates: Arc<Tera>,
     pub http: reqwest::Client,
+    pub resolver: Arc<dyn net_policy::Resolver>,
 }
 
 pub fn router(state: AppState) -> Router {
@@ -51,6 +58,10 @@ pub fn router(state: AppState) -> Router {
         .route("/projects/{slug}", get(handlers::project))
         .route("/projects/{slug}/members", post(handlers::create_member))
         .route("/projects/{slug}/keys", post(handlers::create_ingest_key))
+        .route(
+            "/projects/{slug}/keys/{key_id}/revoke",
+            post(handlers::revoke_ingest_key),
+        )
         .route("/projects/{slug}/issues/{issue_id}", get(handlers::issue))
         .route(
             "/projects/{slug}/issues/{issue_id}/export.md",
@@ -73,6 +84,15 @@ pub fn router(state: AppState) -> Router {
             post(handlers::reopen_issue),
         )
         .route("/settings", get(handlers::settings))
+        .route("/settings/password", post(handlers::change_password))
+        .route(
+            "/settings/sessions/revoke-others",
+            post(handlers::revoke_other_sessions),
+        )
+        .route(
+            "/settings/sessions/{session_id}/revoke",
+            post(handlers::revoke_session),
+        )
         .route(
             "/projects/{slug}/notifications/webhooks",
             post(handlers::create_webhook),
@@ -102,7 +122,7 @@ pub async fn run() -> AppResult<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "zbierak=info,tower_http=info".into()),
+                .unwrap_or_else(|_| "zbierak=info".into()),
         )
         .init();
 
@@ -116,6 +136,7 @@ pub async fn run() -> AppResult<()> {
         http: reqwest::Client::builder()
             .timeout(Duration::from_secs(10))
             .build()?,
+        resolver: Arc::new(net_policy::SystemResolver),
     };
 
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
@@ -244,10 +265,12 @@ mod tests {
                 session_days: 30,
                 static_dir: PathBuf::from("src/static"),
                 template_dir: PathBuf::from("src/templates"),
+                webhook_key: None,
             }),
             db: db.clone(),
             templates: Arc::new(tera::Tera::default()),
             http: reqwest::Client::new(),
+            resolver: std::sync::Arc::new(super::SystemResolver),
         };
         sqlx::query(
             "INSERT INTO notification_endpoints
@@ -351,10 +374,12 @@ mod tests {
                 session_days: 30,
                 static_dir: PathBuf::from("src/static"),
                 template_dir: PathBuf::from("src/templates"),
+                webhook_key: None,
             }),
             db,
             templates: Arc::new(tera::Tera::default()),
             http: reqwest::Client::new(),
+            resolver: std::sync::Arc::new(super::SystemResolver),
         };
         let app = router(state);
         let invalid = r#"{"event_id":"evt-1","timestamp":"2026-09-24T12:00:00Z","message":""}"#;
@@ -420,10 +445,12 @@ mod tests {
                 session_days: 30,
                 static_dir: PathBuf::from("src/static"),
                 template_dir: PathBuf::from("src/templates"),
+                webhook_key: None,
             }),
             db,
             templates: Arc::new(tera::Tera::default()),
             http: reqwest::Client::new(),
+            resolver: std::sync::Arc::new(super::SystemResolver),
         };
 
         assert!(

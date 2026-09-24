@@ -13,7 +13,8 @@ services:
       ZBIERAK_SESSION_DAYS: ${ZBIERAK_SESSION_DAYS:-30}
       ZBIERAK_STATIC_DIR: ${ZBIERAK_STATIC_DIR:-/app/static}
       ZBIERAK_TEMPLATE_DIR: ${ZBIERAK_TEMPLATE_DIR:-/app/templates}
-      RUST_LOG: ${RUST_LOG:-zbierak=info,tower_http=info}
+      ZBIERAK_SECRET_KEY: ${ZBIERAK_SECRET_KEY:-}
+      RUST_LOG: ${RUST_LOG:-zbierak=info}
     ports:
       - "${ZBIERAK_PUBLISH_ADDRESS:-127.0.0.1}:3000:3000"
     volumes:

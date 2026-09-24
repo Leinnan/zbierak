@@ -210,9 +210,10 @@ issue regresses. The durable SQLite outbox is committed with the event, then a
 background worker posts JSON to enabled endpoints. Generic HTTP/HTTPS webhooks
 require a secret of at least 16 characters and receive an
 `x-zbierak-signature: sha256=<base64-hmac>` header. Discord endpoints must be
-HTTPS URLs hosted by `discord.com` or `discordapp.com`. Failed deliveries retry
-with exponential delays and remain pending until they succeed or the endpoint is
-deleted.
+HTTPS URLs hosted by `discord.com` or `discordapp.com`. Deliveries resolve the
+destination, pin the connection to public addresses only, and never follow
+redirects. Failed deliveries retry with exponential delays and remain pending
+until they succeed or the endpoint is deleted.
 
 ## Local Development
 
@@ -249,16 +250,22 @@ requests.
 - Protect `.env`, the `/data` volume, and backups. Event payloads and webhook
   configuration may contain credentials, personal data, stack traces, and source
   details.
-- Scope ingestion keys per project. The current UI creates keys but does not
-  expose rotation or revocation controls.
+- Scope ingestion keys per project. Revoke compromised keys from the project
+  page and create a replacement to rotate credentials.
 - Apply request-rate limits at the reverse proxy. The application limits an event
-  body to 1 MiB but has no built-in rate limiter.
-- Treat webhook URLs as privileged configuration. Generic HTTP/HTTPS destinations
-  are not protected against SSRF, redirects, or private-network targets.
-- Generic webhook secrets are stored in plaintext in SQLite. They are used to
-  produce an `x-zbierak-signature` HMAC-SHA256 header with a Base64 digest.
+  body to 1 MiB, throttles repeated login failures, but has no built-in rate
+  limiter for the ingestion API.
+- Treat webhook URLs as privileged configuration. Destinations are validated
+  against the public internet at creation and pinned to freshly resolved
+  public addresses at delivery; redirects are never followed. Layer
+  deployment-level egress controls for defense in depth.
+- Webhook signing secrets are encrypted at rest with ChaCha20-Poly1305 under
+  `ZBIERAK_SECRET_KEY` (set it in `.env`; generate with `openssl rand -base64
+  32`). They are used to produce an `x-zbierak-signature` HMAC-SHA256 header
+  with a Base64 digest.
 - Browser state-changing authenticated handlers validate a per-session CSRF
-  token. Login itself has no CSRF token or throttling. Responses set a restrictive
+  token, and login is protected by a double-submit CSRF token plus lockout
+  after repeated failures. Responses set a restrictive
   Content Security Policy, `X-Content-Type-Options`, `Referrer-Policy`, and
   `Permissions-Policy`.
 - The Compose service runs as UID/GID `10001`, drops Linux capabilities, prevents

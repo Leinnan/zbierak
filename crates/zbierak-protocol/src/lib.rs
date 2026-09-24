@@ -11,6 +11,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
 
 #[cfg(feature = "schema")]
 use utoipa::ToSchema;
@@ -91,6 +93,7 @@ impl Event {
         }
         validate_required("event_id", &self.event_id, 128)?;
         validate_required("timestamp", &self.timestamp, 64)?;
+        validate_timestamp("timestamp", &self.timestamp)?;
         validate_required("message", &self.message, 16_384)?;
         if self.tags.len() > 100 {
             return Err(ValidationError::new(
@@ -354,6 +357,28 @@ fn validate_optional(field: &'static str, value: &str, max: usize) -> Result<(),
     Ok(())
 }
 
+/// Parsed timestamps must be RFC 3339 and land within a sane operational window
+/// (year 2000 through 2100) so clock malfunctions cannot poison stored data.
+const MIN_TIMESTAMP_YEAR: i32 = 2000;
+const MAX_TIMESTAMP_YEAR: i32 = 2100;
+
+pub fn validate_timestamp(field: &'static str, value: &str) -> Result<(), ValidationError> {
+    let parsed = OffsetDateTime::parse(value, &Rfc3339).map_err(|_| {
+        ValidationError::new(
+            field,
+            "must be an RFC 3339 timestamp such as 2026-09-24T12:00:00Z",
+        )
+    })?;
+    let year = parsed.year();
+    if !(MIN_TIMESTAMP_YEAR..=MAX_TIMESTAMP_YEAR).contains(&year) {
+        return Err(ValidationError::new(
+            field,
+            format!("must fall between years {MIN_TIMESTAMP_YEAR} and {MAX_TIMESTAMP_YEAR}"),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +439,36 @@ mod tests {
         assert_eq!(event.version, PROTOCOL_VERSION);
         assert_eq!(event.severity, Severity::Error);
         assert!(event.tags.is_empty());
+    }
+
+    #[test]
+    fn timestamps_accept_rfc3339_variants() {
+        for stamp in [
+            "2026-09-24T12:00:00Z",
+            "2026-09-24T12:00:00+02:00",
+            "2026-09-24T12:00:00.123456789-05:30",
+            "2026-01-01T00:00:00z",
+        ] {
+            let mut event = valid_event();
+            event.timestamp = stamp.into();
+            assert!(event.validate().is_ok(), "rejected valid {stamp}");
+        }
+    }
+
+    #[test]
+    fn timestamps_reject_non_rfc3339_and_implausible_dates() {
+        for stamp in [
+            "",
+            "not a timestamp",
+            "2026-09-24 12:00:00",
+            "2026-13-40T25:99:99Z",
+            "2101-01-01T00:00:00Z",
+            "1999-12-31T23:59:59Z",
+        ] {
+            let mut event = valid_event();
+            event.timestamp = stamp.into();
+            let error = event.validate().unwrap_err();
+            assert_eq!(error.field(), "timestamp", "wrong field for {stamp}");
+        }
     }
 }

@@ -20,8 +20,8 @@ use utoipa::{
 };
 use utoipa_scalar::{Scalar, Servable};
 
-use crate::{api_error::ErrorResponse, handlers};
-use zbierak_protocol as protocol;
+use crate::handlers;
+use zbierak_protocol::{self as protocol, ApiErrorResponse as ApiErrorSchema};
 
 /// OpenAPI document for the versioned HTTP API.
 #[derive(OpenApi)]
@@ -48,7 +48,7 @@ use zbierak_protocol as protocol;
         protocol::IngestResponse,
         protocol::IngestStatus,
         handlers::IngestResponse,
-        ErrorResponse,
+        ApiErrorSchema,
         IssueSummary,
     )),
     modifiers(&SecurityAddon),
@@ -110,7 +110,7 @@ pub struct Pagination {
     ),
     responses(
         (status = 200, description = "Issues ordered by most recent activity", body = [IssueSummary]),
-        (status = 404, description = "Unknown project", body = ErrorResponse),
+        (status = 404, description = "Unknown project", body = ApiErrorSchema),
     )
 )]
 pub async fn list_issues_example(

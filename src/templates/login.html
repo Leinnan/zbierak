@@ -19,6 +19,7 @@
       <p class="text-secondary">Sign in to inspect your projects.</p>
       {% include "fragments/flash.html" %}
       <form method="post" action="/login">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token | default(value='') }}">
         <div id="login-result" aria-live="polite">{% include "fragments/form_error.html" %}</div>
         <div class="mb-3">
           <label class="form-label" for="email">Email address</label>

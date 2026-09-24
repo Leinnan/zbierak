@@ -43,6 +43,20 @@
         <div class="list-group-item management-row">
           <div><strong>{{ key.name }}</strong><small><code>{{ key.key_prefix }}…</code></small></div>
           <div class="text-end"><small>Created <time class="js-local-time" data-unix="{{ key.created_at }}">{{ key.created_at }}</time></small><small>{% if key.last_used_at %}Last used <time class="js-local-time" data-unix="{{ key.last_used_at }}">{{ key.last_used_at }}</time>{% else %}Never used{% endif %}</small></div>
+          {% if project.role == "owner" or project.role == "admin" %}
+          <details class="delete-disclosure">
+            <summary class="btn btn-sm btn-outline-danger">Revoke</summary>
+            <div class="delete-panel">
+              <p>Producers using this key immediately receive HTTP 401. This cannot be undone.</p>
+              <div class="delete-actions">
+                <form method="post" action="/projects/{{ project.slug }}/keys/{{ key.id }}/revoke">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                  <button class="btn btn-sm btn-danger" type="submit" data-confirm="Revoke key {{ key.name }}?">Confirm revoke</button>
+                </form>
+              </div>
+            </div>
+          </details>
+          {% endif %}
         </div>
         {% else %}
         <div class="list-group-item text-secondary">No active ingest keys.</div>

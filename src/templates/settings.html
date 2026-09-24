@@ -1,11 +1,11 @@
 {% extends "base.html" %}
 {% import "fragments/ui.html" as ui %}
-{% block title %}Notifications · {{ app_name | default(value="Zbierak") }}{% endblock title %}
+{% block title %}Settings · {{ app_name | default(value="Zbierak") }}{% endblock title %}
 {% block content %}
-<header class="page-heading"><div><p class="eyebrow">Settings</p><h1>Notifications</h1><p>Send new issue events to an HTTP webhook or Discord channel.</p></div></header>
+<header class="page-heading"><div><p class="eyebrow">Settings</p><h1>Settings</h1><p>Notification delivery and account security.</p></div></header>
 
 <div class="settings-layout">
-  <nav class="settings-nav" aria-label="Notification sections"><a href="#endpoints">Endpoints</a><a href="#add-endpoint">Add endpoint</a></nav>
+  <nav class="settings-nav" aria-label="Settings sections"><a href="#endpoints">Endpoints</a><a href="#add-endpoint">Add endpoint</a><a href="#account">Account</a></nav>
   <div class="settings-content">
     <section class="settings-section" id="endpoints" aria-labelledby="endpoints-title">
       <div class="section-heading"><div><p class="eyebrow">Destinations</p><h2 id="endpoints-title">Configured endpoints</h2></div><span>{{ notification_endpoints | default(value=[]) | length }}</span></div>
@@ -74,6 +74,48 @@
         {% else %}
         <div class="alert alert-info">Create a project before configuring notifications.</div>
         {% endfor %}
+      </div>
+    </section>
+
+    <section class="settings-section" id="account" aria-labelledby="account-title">
+      <div class="section-heading"><div><p class="eyebrow">Security</p><h2 id="account-title">Account</h2></div></div>
+      <div class="project-endpoint-list">
+        <article class="card endpoint-create-card">
+          <div class="card-header"><div><h3 class="card-title">Change password</h3><p>Other sessions are signed out when the password changes.</p></div></div>
+          <div class="card-body">
+            <form class="compact-form" method="post" action="/settings/password">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <div><label class="form-label" for="current-password">Current password</label><input class="form-control" id="current-password" name="current_password" type="password" autocomplete="current-password" required></div>
+              <div><label class="form-label" for="new-password">New password</label><input class="form-control" id="new-password" name="new_password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required><div class="form-hint">At least 12 characters.</div></div>
+              <button class="btn btn-primary" type="submit">Update password</button>
+            </form>
+          </div>
+        </article>
+        <article class="card endpoint-create-card">
+          <div class="card-header"><div><h3 class="card-title">Active sessions</h3><p>Sessions expire automatically; revoke anything you do not recognize.</p></div></div>
+          <div class="list-group list-group-flush">
+            {% for session_row in sessions | default(value=[]) %}
+            <div class="list-group-item management-row">
+              <div><strong>{% if session_row.is_current %}This session{% else %}Session #{{ session_row.id }}{% endif %}</strong><small>Started <time class="js-local-time" data-unix="{{ session_row.created_at }}">{{ session_row.created_at }}</time></small></div>
+              <div class="text-end"><small>Expires <time class="js-local-time" data-unix="{{ session_row.expires_at }}">{{ session_row.expires_at }}</time></small></div>
+              {% if not session_row.is_current %}
+              <form method="post" action="/settings/sessions/{{ session_row.id }}/revoke">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="btn btn-sm btn-outline-danger" type="submit">Revoke</button>
+              </form>
+              {% endif %}
+            </div>
+            {% else %}
+            <div class="list-group-item text-secondary">No active sessions.</div>
+            {% endfor %}
+          </div>
+          <div class="card-footer">
+            <form method="post" action="/settings/sessions/revoke-others">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="btn btn-outline-danger" type="submit">Sign out everywhere else</button>
+            </form>
+          </div>
+        </article>
       </div>
     </section>
   </div>

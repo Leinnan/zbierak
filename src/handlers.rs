@@ -10,22 +10,24 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use sqlx::{FromRow, Row};
 use tera::Context;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
-use tower_cookies::Cookies;
+use tower_cookies::{Cookie, Cookies};
 use url::Url;
 use uuid::Uuid;
 
 use crate::{
     AppError, AppResult, AppState,
     api_error::ApiError,
+    audit,
     auth::{self, User},
     fingerprint::event_fingerprint,
 };
 
 #[cfg(feature = "docs")]
-use crate::api_error::ErrorResponse;
+use zbierak_protocol::ApiErrorResponse;
 
 #[derive(Deserialize)]
 pub struct BootstrapForm {
@@ -36,6 +38,8 @@ pub struct BootstrapForm {
 
 #[derive(Deserialize)]
 pub struct LoginForm {
+    #[serde(default)]
+    csrf_token: String,
     email: String,
     password: String,
 }
@@ -43,6 +47,13 @@ pub struct LoginForm {
 #[derive(Deserialize)]
 pub struct CsrfForm {
     csrf_token: String,
+}
+
+#[derive(Deserialize)]
+pub struct PasswordForm {
+    csrf_token: String,
+    current_password: String,
+    new_password: String,
 }
 
 #[derive(Deserialize)]
@@ -175,6 +186,14 @@ struct ActivityRow {
     created_at: i64,
 }
 
+#[derive(Debug, Serialize, FromRow)]
+struct SessionRow {
+    id: i64,
+    created_at: i64,
+    expires_at: i64,
+    is_current: bool,
+}
+
 pub async fn home(State(state): State<AppState>, cookies: Cookies) -> AppResult<Redirect> {
     if auth::session(&state, &cookies).await?.is_some() {
         return Ok(Redirect::to("/projects"));
@@ -233,8 +252,22 @@ pub async fn bootstrap(
     Ok(Redirect::to("/projects"))
 }
 
-pub async fn login_page(State(state): State<AppState>) -> AppResult<Html<String>> {
-    render(&state, "login.html", Context::new())
+pub async fn login_page(
+    State(state): State<AppState>,
+    cookies: Cookies,
+) -> AppResult<Html<String>> {
+    // Double-submit CSRF: the anonymous cookie value must round-trip through
+    // the rendered form, so a cross-site post cannot guess it.
+    let token = auth::random_token(24);
+    let cookie = Cookie::build((auth::LOGIN_CSRF_COOKIE, token.clone()))
+        .path("/login")
+        .http_only(true)
+        .same_site(tower_cookies::cookie::SameSite::Lax)
+        .build();
+    cookies.add(cookie);
+    let mut context = Context::new();
+    context.insert("csrf_token", &token);
+    render(&state, "login.html", context)
 }
 
 pub async fn login(
@@ -242,6 +275,16 @@ pub async fn login(
     cookies: Cookies,
     Form(form): Form<LoginForm>,
 ) -> AppResult<Redirect> {
+    let cookie_token = cookies
+        .get(auth::LOGIN_CSRF_COOKIE)
+        .map(|cookie| cookie.value().to_owned())
+        .unwrap_or_default();
+    if !auth::secure_eq(&cookie_token, &form.csrf_token) || cookie_token.is_empty() {
+        return Err(AppError::Forbidden);
+    }
+    if auth::login_locked(&state, &form.email).await? {
+        return Err(AppError::Unauthorized);
+    }
     let row = sqlx::query_as::<_, (i64, String)>(
         "SELECT id, password_hash FROM users WHERE email = ? COLLATE NOCASE",
     )
@@ -249,12 +292,42 @@ pub async fn login(
     .fetch_optional(&state.db)
     .await?;
     let Some((user_id, hash)) = row else {
+        auth::login_failure(&state, &form.email).await?;
+        audit::record(
+            &state.db,
+            None,
+            "user.login_failed",
+            Some("identity"),
+            Some(auth::token_hash(&form.email.trim().to_ascii_lowercase())),
+            json!({ "reason": "unknown_email" }),
+        )
+        .await?;
         return Err(AppError::Unauthorized);
     };
     if !auth::verify_password(&form.password, &hash) {
+        auth::login_failure(&state, &form.email).await?;
+        audit::record(
+            &state.db,
+            Some(user_id),
+            "user.login_failed",
+            Some("user"),
+            Some(user_id.to_string()),
+            json!({ "reason": "wrong_password" }),
+        )
+        .await?;
         return Err(AppError::Unauthorized);
     }
+    auth::login_success(&state, &form.email).await?;
     auth::create_session(&state, &cookies, user_id).await?;
+    audit::record(
+        &state.db,
+        Some(user_id),
+        "user.login",
+        Some("user"),
+        Some(user_id.to_string()),
+        json!({}),
+    )
+    .await?;
     Ok(Redirect::to("/projects"))
 }
 
@@ -544,6 +617,36 @@ pub async fn create_ingest_key(
     render(&state, "project.html", context)
 }
 
+pub async fn revoke_ingest_key(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    AxumPath((slug, key_id)): AxumPath<(String, i64)>,
+    Form(form): Form<CsrfForm>,
+) -> AppResult<Redirect> {
+    let session = auth::require_session(&state, &cookies).await?;
+    auth::check_csrf(&session, &form.csrf_token)?;
+    let project_id = auth::require_project_role(&state, session.user.id, &slug, "admin").await?;
+    let result =
+        sqlx::query("UPDATE ingest_keys SET revoked_at=unixepoch() WHERE id=? AND project_id=? AND revoked_at IS NULL")
+            .bind(key_id)
+            .bind(project_id)
+            .execute(&state.db)
+            .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    audit::record(
+        &state.db,
+        Some(session.user.id),
+        "ingest_key.revoked",
+        Some("ingest_key"),
+        Some(key_id.to_string()),
+        json!({ "project": slug }),
+    )
+    .await?;
+    Ok(Redirect::to(&format!("/projects/{slug}")))
+}
+
 struct IssueDetails {
     project: ProjectRow,
     issue: Value,
@@ -816,7 +919,117 @@ pub async fn settings(State(state): State<AppState>, cookies: Cookies) -> AppRes
     let mut context = page_context(&session.user, &session.csrf_token);
     context.insert("projects", &projects);
     context.insert("notification_endpoints", &endpoints);
+    let current_token_hash = cookies
+        .get(auth::SESSION_COOKIE)
+        .map(|cookie| auth::token_hash(cookie.value()));
+    let sessions = sqlx::query_as::<_, SessionRow>(
+        "SELECT id, created_at, expires_at, (token_hash = ?) AS is_current FROM sessions
+         WHERE user_id=? AND expires_at > unixepoch() ORDER BY created_at DESC",
+    )
+    .bind(current_token_hash.unwrap_or_default())
+    .bind(session.user.id)
+    .fetch_all(&state.db)
+    .await?;
+    context.insert("sessions", &sessions);
     render(&state, "settings.html", context)
+}
+
+pub async fn change_password(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Form(form): Form<PasswordForm>,
+) -> AppResult<Redirect> {
+    let session = auth::require_session(&state, &cookies).await?;
+    auth::check_csrf(&session, &form.csrf_token)?;
+    let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id=?")
+        .bind(session.user.id)
+        .fetch_one(&state.db)
+        .await?;
+    if !auth::verify_password(&form.current_password, &hash) {
+        return Err(AppError::Unauthorized);
+    }
+    let new_hash = auth::hash_password(&form.new_password)?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE users SET password_hash=? WHERE id=?")
+        .bind(&new_hash)
+        .bind(session.user.id)
+        .execute(&mut *tx)
+        .await?;
+    // Keep the current session alive, but evict every other one so a stolen
+    // credential cannot survive a rotation.
+    let current = cookies
+        .get(auth::SESSION_COOKIE)
+        .map(|cookie| auth::token_hash(cookie.value()))
+        .unwrap_or_default();
+    sqlx::query("DELETE FROM sessions WHERE user_id=? AND token_hash != ?")
+        .bind(session.user.id)
+        .bind(current)
+        .execute(&mut *tx)
+        .await?;
+    tx.commit().await?;
+    audit::record(
+        &state.db,
+        Some(session.user.id),
+        "user.password_changed",
+        Some("user"),
+        Some(session.user.id.to_string()),
+        json!({ "email": session.user.email }),
+    )
+    .await?;
+    Ok(Redirect::to("/settings"))
+}
+
+pub async fn revoke_other_sessions(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    Form(form): Form<CsrfForm>,
+) -> AppResult<Redirect> {
+    let session = auth::require_session(&state, &cookies).await?;
+    auth::check_csrf(&session, &form.csrf_token)?;
+    let current = cookies
+        .get(auth::SESSION_COOKIE)
+        .map(|cookie| auth::token_hash(cookie.value()))
+        .unwrap_or_default();
+    sqlx::query("DELETE FROM sessions WHERE user_id=? AND token_hash != ?")
+        .bind(session.user.id)
+        .bind(current)
+        .execute(&state.db)
+        .await?;
+    audit::record(
+        &state.db,
+        Some(session.user.id),
+        "user.sessions_revoked_others",
+        Some("user"),
+        Some(session.user.id.to_string()),
+        json!({}),
+    )
+    .await?;
+    Ok(Redirect::to("/settings"))
+}
+
+pub async fn revoke_session(
+    State(state): State<AppState>,
+    cookies: Cookies,
+    AxumPath(session_id): AxumPath<i64>,
+    Form(form): Form<CsrfForm>,
+) -> AppResult<Redirect> {
+    let session = auth::require_session(&state, &cookies).await?;
+    auth::check_csrf(&session, &form.csrf_token)?;
+    sqlx::query("DELETE FROM sessions WHERE id=? AND user_id=?")
+        .bind(session_id)
+        .bind(session.user.id)
+        .execute(&state.db)
+        .await?;
+    audit::record(
+        &state.db,
+        Some(session.user.id),
+        "user.session_revoked",
+        Some("session"),
+        Some(session_id.to_string()),
+        json!({}),
+    )
+    .await?;
+    Ok(Redirect::to("/settings"))
 }
 
 pub async fn create_webhook(
@@ -845,28 +1058,53 @@ pub async fn create_webhook(
             return Err(AppError::BadRequest("invalid Discord webhook URL".into()));
         }
     }
-    let secret = if form.kind == "webhook" {
+    // Reject destinations that resolve only to internal addresses; delivery
+    // re-resolves and pins the addresses it will contact.
+    let default_port = if url.scheme() == "https" { 443 } else { 80 };
+    crate::net_policy::resolve_allowed_with(
+        url.host_str().unwrap_or_default(),
+        url.port_or_known_default().unwrap_or(default_port),
+        |host, port| state.resolver.resolve(host, port),
+    )
+    .await
+    .map_err(|error| AppError::BadRequest(format!("webhook destination rejected: {error}")))?;
+    let (secret, secret_encrypted) = if form.kind == "webhook" {
         let secret = required_text("webhook secret", form.secret.as_deref().unwrap_or(""), 1024)?;
         if secret.len() < 16 {
             return Err(AppError::BadRequest(
                 "webhook secret must contain at least 16 characters".into(),
             ));
         }
-        Some(secret.to_owned())
+        let key = state.config.webhook_key.ok_or_else(|| {
+            AppError::BadRequest(
+                "ZBIERAK_SECRET_KEY must be configured to store webhook signing secrets".into(),
+            )
+        })?;
+        (Some(crate::secrets::encrypt(&key, secret)?), 1)
     } else {
-        None
+        (None, 0)
     };
     sqlx::query(
-        "INSERT INTO notification_endpoints (project_id, name, kind, url, secret, created_by)
-         VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT INTO notification_endpoints (project_id, name, kind, url, secret, secret_encrypted, created_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .bind(project_id)
     .bind(name)
-    .bind(form.kind)
+    .bind(form.kind.clone())
     .bind(url.as_str())
     .bind(secret)
+    .bind(secret_encrypted)
     .bind(session.user.id)
     .execute(&state.db)
+    .await?;
+    audit::record(
+        &state.db,
+        Some(session.user.id),
+        "webhook.created",
+        Some("notification_endpoint"),
+        None,
+        json!({ "project": slug, "kind": form.kind }),
+    )
     .await?;
     Ok(Redirect::to("/settings"))
 }
@@ -888,6 +1126,15 @@ pub async fn delete_webhook(
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
+    audit::record(
+        &state.db,
+        Some(session.user.id),
+        "webhook.deleted",
+        Some("notification_endpoint"),
+        Some(webhook_id.to_string()),
+        json!({ "project": slug }),
+    )
+    .await?;
     Ok(Redirect::to("/settings"))
 }
 
@@ -910,9 +1157,11 @@ pub struct IngestResponse {
     security(("bearer_auth" = [])),
     responses(
         (status = 202, description = "Event accepted, or an idempotent duplicate", body = IngestResponse),
-        (status = 400, description = "Malformed request body", body = ErrorResponse),
-        (status = 401, description = "Missing or invalid ingest key", body = ErrorResponse),
-        (status = 422, description = "Event failed protocol validation", body = ErrorResponse),
+        (status = 400, description = "Malformed request body", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid ingest key", body = ApiErrorResponse),
+        (status = 409, description = "Event ID reused with different content", body = ApiErrorResponse),
+        (status = 413, description = "Event body exceeds 1 MiB", body = ApiErrorResponse),
+        (status = 422, description = "Event failed protocol validation", body = ApiErrorResponse),
     )
 ))]
 pub async fn ingest(
@@ -922,7 +1171,7 @@ pub async fn ingest(
     body: Bytes,
 ) -> Result<impl IntoResponse, ApiError> {
     if body.len() > 1_048_576 {
-        return Err(AppError::BadRequest("event exceeds 1 MiB".into()).into());
+        return Err(AppError::PayloadTooLarge("event exceeds 1 MiB".into()).into());
     }
     let bearer = auth::bearer(&headers)?;
     let key_hash = auth::token_hash(bearer);
@@ -951,10 +1200,14 @@ pub async fn ingest(
     let storage_id = Uuid::new_v4().to_string();
     let payload = String::from_utf8(body.to_vec())
         .map_err(|_| AppError::BadRequest("event body must be UTF-8 JSON".into()))?;
+    let body_hash = Sha256::digest(body.as_ref())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
     let mut tx = state.db.begin().await?;
     let inserted = sqlx::query(
-        "INSERT INTO raw_events (id, project_id, ingest_key_id, body, producer_event_id)
-         VALUES (?, ?, ?, ?, ?)
+        "INSERT INTO raw_events (id, project_id, ingest_key_id, body, producer_event_id, body_hash)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(project_id, producer_event_id) DO NOTHING",
     )
     .bind(&storage_id)
@@ -962,20 +1215,31 @@ pub async fn ingest(
     .bind(key_id)
     .bind(body.as_ref())
     .bind(&producer_event_id)
+    .bind(&body_hash)
     .execute(&mut *tx)
     .await?
     .rows_affected()
         == 1;
     if !inserted {
-        let (issue_id, existing_fingerprint) = sqlx::query_as::<_, (i64, String)>(
-            "SELECT e.issue_id, e.fingerprint FROM events e
+        let (existing_hash, issue_id, existing_fingerprint) =
+            sqlx::query_as::<_, (Option<String>, i64, String)>(
+                "SELECT r.body_hash, e.issue_id, e.fingerprint FROM events e
              JOIN raw_events r ON r.id=e.id
              WHERE r.project_id=? AND r.producer_event_id=?",
-        )
-        .bind(project_id)
-        .bind(&producer_event_id)
-        .fetch_one(&mut *tx)
-        .await?;
+            )
+            .bind(project_id)
+            .bind(&producer_event_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if existing_hash
+            .as_deref()
+            .is_some_and(|stored| stored != body_hash)
+        {
+            return Err(AppError::Conflict(format!(
+                "event_id {producer_event_id} was already ingested with different content"
+            ))
+            .into());
+        }
         sqlx::query("UPDATE ingest_keys SET last_used_at=unixepoch() WHERE id=?")
             .bind(key_id)
             .execute(&mut *tx)
@@ -1093,7 +1357,7 @@ pub async fn health() -> &'static str {
     operation_id = "ready",
     responses(
         (status = 200, description = "Database is reachable", body = String, content_type = "text/plain"),
-        (status = 500, description = "Database check failed", body = ErrorResponse)
+        (status = 500, description = "Database check failed", body = ApiErrorResponse)
     )
 ))]
 pub async fn ready(State(state): State<AppState>) -> Result<&'static str, ApiError> {

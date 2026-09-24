@@ -3,25 +3,15 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
 
 use crate::AppError;
 
 /// JSON error body returned by the versioned HTTP API.
 ///
 /// The operator UI keeps rendering HTML errors; only `/api/v1/*` handlers wrap
-/// failures in [`ApiError`] so clients receive a machine-readable body.
-#[cfg_attr(feature = "docs", derive(utoipa::ToSchema))]
-#[derive(Debug, Serialize)]
-pub struct ErrorResponse {
-    /// Stable machine-readable error code.
-    pub code: String,
-    /// Human-readable explanation.
-    pub message: String,
-    /// Field that caused the error, when the failure is field-scoped.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub field: Option<String>,
-}
+/// failures in [`ApiError`] so clients receive a machine-readable body. The
+/// shape is the protocol crate's [`zbierak_protocol::ApiErrorResponse`].
+pub use zbierak_protocol::ApiErrorResponse;
 
 /// Adapter that renders [`AppError`] as a JSON response for API routes.
 pub struct ApiError(pub AppError);
@@ -42,6 +32,10 @@ impl IntoResponse for ApiError {
             AppError::Forbidden => (StatusCode::FORBIDDEN, "forbidden", None),
             AppError::NotFound => (StatusCode::NOT_FOUND, "not_found", None),
             AppError::BadRequest(_) => (StatusCode::BAD_REQUEST, "bad_request", None),
+            AppError::Conflict(_) => (StatusCode::CONFLICT, "event_id_conflict", None),
+            AppError::PayloadTooLarge(_) => {
+                (StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", None)
+            }
             AppError::Unprocessable { field, .. } => (
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "validation_failed",
@@ -54,7 +48,7 @@ impl IntoResponse for ApiError {
         };
         (
             status,
-            Json(ErrorResponse {
+            Json(ApiErrorResponse {
                 code: code.to_owned(),
                 message: self.0.to_string(),
                 field,

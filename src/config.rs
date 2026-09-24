@@ -14,6 +14,8 @@ pub struct Config {
     pub session_days: i64,
     pub static_dir: PathBuf,
     pub template_dir: PathBuf,
+    /// Master key encrypting webhook signing secrets at rest.
+    pub webhook_key: Option<[u8; 32]>,
 }
 
 impl Config {
@@ -41,6 +43,15 @@ impl Config {
                 "ZBIERAK_SESSION_DAYS must be between 1 and 365".into(),
             ));
         }
+        let webhook_key = match env::var("ZBIERAK_SECRET_KEY") {
+            Ok(raw) => Some(crate::secrets::parse_key(&raw)?),
+            Err(env::VarError::NotPresent) => None,
+            Err(error) => {
+                return Err(AppError::Config(format!(
+                    "invalid ZBIERAK_SECRET_KEY: {error}"
+                )));
+            }
+        };
         Ok(Self {
             bind,
             database_url,
@@ -48,6 +59,7 @@ impl Config {
             session_days,
             static_dir: resolve_asset_dir("ZBIERAK_STATIC_DIR", "static"),
             template_dir: resolve_asset_dir("ZBIERAK_TEMPLATE_DIR", "templates"),
+            webhook_key,
         })
     }
 }
