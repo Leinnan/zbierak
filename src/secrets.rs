@@ -10,7 +10,7 @@ use chacha20poly1305::{
     ChaCha20Poly1305,
     aead::{Aead, KeyInit, Payload},
 };
-use rand::RngCore;
+use rand::Rng;
 
 use crate::{AppError, AppResult};
 
@@ -42,7 +42,7 @@ pub fn parse_key(raw: &str) -> AppResult<[u8; KEY_BYTES]> {
 #[must_use]
 pub fn generate_key() -> String {
     let mut key = [0_u8; KEY_BYTES];
-    rand::thread_rng().fill_bytes(&mut key);
+    rand::rng().fill_bytes(&mut key);
     URL_SAFE_NO_PAD.encode(key)
 }
 
@@ -80,7 +80,7 @@ fn open(key: &[u8; KEY_BYTES], nonce: &[u8; NONCE_BYTES], ciphertext: &[u8]) -> 
 /// broken build or environment rather than caller input.
 pub fn encrypt(key: &[u8; KEY_BYTES], plaintext: &str) -> AppResult<String> {
     let mut nonce = [0_u8; NONCE_BYTES];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    rand::rng().fill_bytes(&mut nonce);
     let ciphertext = seal(key, &nonce, plaintext.as_bytes())?;
     Ok(format!(
         "{VERSION}:{}:{}",

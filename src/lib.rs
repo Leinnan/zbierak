@@ -281,9 +281,37 @@ pub async fn run() -> AppResult<()> {
     Ok(())
 }
 
-fn load_templates(directory: &std::path::Path) -> AppResult<Tera> {
+/// Loads the operator-UI templates from `directory` and registers the
+/// application's custom Tera filters.
+///
+/// Tera 2 removed the built-in `urlencode` filter (formerly gated behind the
+/// `builtins` feature), so it is provided here; templates rely on it to
+/// percent-encode tag values into query-string links.
+///
+/// # Errors
+///
+/// Returns [`AppError::Config`] when the glob fails to parse any template or
+/// a required template is missing.
+pub fn load_templates(directory: &std::path::Path) -> AppResult<Tera> {
+    fn urlencode(value: &str, _: tera::Kwargs, _: &tera::State) -> String {
+        let mut encoded = String::with_capacity(value.len());
+        for byte in value.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(byte as char);
+                }
+                other => {
+                    let _ = std::fmt::Write::write_fmt(&mut encoded, format_args!("%{other:02X}"));
+                }
+            }
+        }
+        encoded
+    }
+
     let pattern = format!("{}/**/*.html", directory.display());
-    let tera = Tera::new(&pattern)?;
+    let mut tera = Tera::new();
+    tera.register_filter("urlencode", urlencode);
+    tera.load_from_glob(&pattern)?;
     for name in [
         "base.html",
         "login.html",
@@ -297,12 +325,12 @@ fn load_templates(directory: &std::path::Path) -> AppResult<Tera> {
         "user_settings.html",
         "error.html",
     ] {
-        tera.get_template(name).map_err(|_| {
-            AppError::Config(format!(
+        if !tera.contains_template(name) {
+            return Err(AppError::Config(format!(
                 "required template {}/{name} is missing",
                 directory.display()
-            ))
-        })?;
+            )));
+        }
     }
     Ok(tera)
 }

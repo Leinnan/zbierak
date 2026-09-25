@@ -1,4 +1,3 @@
-{% import "fragments/ui.html" as ui %}
 <div id="issue-list" class="card">
   <div class="table-responsive">
     <table class="table table-vcenter card-table issue-table">
@@ -25,19 +24,19 @@
             {% for issue_tag in issue.tags | default(value=[]) %}
             {% set issue_tag_enc = issue_tag | urlencode %}
             {% set issue_href = "/projects/" ~ project.slug ~ "?tag=" ~ issue_tag_enc %}
-            {{ ui::tag_chip(tag=issue_tag, href=issue_href) }}
+            {{ <ui.tag_chip tag={issue_tag} href={issue_href} /> }}
             {% else %}
             <span class="text-secondary">—</span>
             {% endfor %}
           </td>
-          <td>{{ ui::status(value=issue_status) }}</td>
+          <td>{{ <ui.status value={issue_status} /> }}</td>
           <td class="text-end tabular-nums">{{ issue.event_count | default(value=1) }}</td>
           <td>
             <time class="js-local-time" data-unix="{{ issue.last_seen_at }}">{{ issue.last_seen_at }}</time>
           </td>
         </tr>
         {% else %}
-        <tr><td colspan="5">{{ ui::empty(title="No issues yet", message="Send an event with an ingest key to begin tracking failures.") }}</td></tr>
+        <tr><td colspan="5">{{ <ui.empty title="No issues yet" message="Send an event with an ingest key to begin tracking failures." /> }}</td></tr>
         {% endfor %}
       </tbody>
     </table>

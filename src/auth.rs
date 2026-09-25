@@ -1,13 +1,10 @@
 use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use argon2::{
-    Argon2, PasswordHash, PasswordHasher, PasswordVerifier,
-    password_hash::{SaltString, rand_core::OsRng},
-};
+use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier};
 use axum::http::HeaderMap;
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::RngCore;
+use rand::Rng;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use sqlx::FromRow;
@@ -125,7 +122,7 @@ pub fn hash_password(password: &str) -> AppResult<String> {
         ));
     }
     Argon2::default()
-        .hash_password(password.as_bytes(), &SaltString::generate(&mut OsRng))
+        .hash_password(password.as_bytes())
         .map(|hash| hash.to_string())
         .map_err(|error| AppError::Config(format!("password hashing failed: {error}")))
 }
@@ -144,7 +141,7 @@ pub fn verify_password(password: &str, encoded: &str) -> bool {
 
 pub fn random_token(bytes: usize) -> String {
     let mut value = vec![0_u8; bytes];
-    rand::thread_rng().fill_bytes(&mut value);
+    rand::rng().fill_bytes(&mut value);
     URL_SAFE_NO_PAD.encode(value)
 }
 

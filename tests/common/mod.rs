@@ -69,10 +69,11 @@ pub fn app_with_templates_and_config(db: SqlitePool, config: Config) -> Router {
 }
 
 pub fn app_with(db: SqlitePool, config: Config, resolver: Arc<dyn zbierak::Resolver>) -> Router {
-    let templates = tera::Tera::new(concat!(
-        env!("CARGO_MANIFEST_DIR"),
-        "/src/templates/**/*.html"
-    ))
+    let templates = zbierak::load_templates(
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("src/templates")
+            .as_path(),
+    )
     .unwrap();
     let state = AppState {
         config: Arc::new(config),

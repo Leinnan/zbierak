@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% import "fragments/ui.html" as ui %}
 {% block title %}Settings · {{ app_name | default(value="Zbierak") }}{% endblock title %}
 {% block content %}
 <header class="page-heading"><div><p class="eyebrow">Settings</p><h1>Settings</h1><p>Appearance, notification delivery, and personal API tokens. User profiles live in <a href="/users/{{ user.id }}">your user page</a>.</p></div></header>
@@ -51,7 +50,7 @@
           {% endfor %}
         </article>
         {% else %}
-        <div class="card">{{ ui::empty(title="No notification endpoints", message="Add a webhook or Discord destination below.") }}</div>
+        <div class="card">{{ <ui.empty title="No notification endpoints" message="Add a webhook or Discord destination below." /> }}</div>
         {% endfor %}
       </div>
     </section>

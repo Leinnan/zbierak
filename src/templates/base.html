@@ -1,4 +1,3 @@
-{% import "fragments/ui.html" as ui %}
 <!doctype html>
 <html lang="{{ lang | default(value="en") }}">
 <head>
@@ -34,7 +33,7 @@
       </nav>
       <div class="sidebar-foot">
         <div class="user-summary">
-          {% if user.avatar %}{{ ui::avatar(name=user.display_name, avatar_url=user.avatar.url, user_id=user.id) }}{% else %}{{ ui::avatar(name=user.display_name, user_id=user.id) }}{% endif %}
+          {% if user.avatar %}{{ <ui.avatar name={user.display_name} avatar_url={user.avatar.url} user_id={user.id} /> }}{% else %}{{ <ui.avatar name={user.display_name} user_id={user.id} /> }}{% endif %}
           <a href="/users/{{ user.id }}"><strong>{{ user.display_name | default(value="Administrator") }}</strong><small>{{ user.email | default(value="") }}</small></a>
         </div>
         <form method="post" action="/logout">

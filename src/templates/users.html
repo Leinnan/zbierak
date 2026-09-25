@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% import "fragments/ui.html" as ui %}
 {% block title %}Users · {{ app_name | default(value="Zbierak") }}{% endblock title %}
 {% block content %}
 <header class="page-heading"><div><p class="eyebrow">Directory</p><h1>Users</h1><p>Everyone with an account on this instance.</p></div></header>
@@ -10,7 +9,7 @@
       {% for member in directory | default(value=[]) %}
       <a class="list-group-item management-row list-group-item-action" href="/users/{{ member.id }}">
         <div class="user-summary">
-          {% if member.avatar_url %}{{ ui::avatar(name=member.display_name, avatar_url=member.avatar_url, user_id=member.id) }}{% else %}{{ ui::avatar(name=member.display_name, user_id=member.id) }}{% endif %}
+          {% if member.avatar_url %}{{ <ui.avatar name={member.display_name} avatar_url={member.avatar_url} user_id={member.id} /> }}{% else %}{{ <ui.avatar name={member.display_name} user_id={member.id} /> }}{% endif %}
           <span><strong>{{ member.display_name }}</strong><small>{{ member.email }}</small></span>
         </div>
         <div class="text-end">

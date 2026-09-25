@@ -1,36 +1,36 @@
-{% macro severity(value="error") %}
+{% component ui.severity(value: string = "error") %}
 {% set level = value | default(value="error") | lower %}
 <span class="severity severity-{{ level }}">{{ level }}</span>
-{% endmacro severity %}
+{% endcomponent ui.severity %}
 
-{% macro status(value="open") %}
+{% component ui.status(value: string = "open") %}
 {% set state = value | default(value="open") | lower %}
 <span class="status-pill status-{{ state }}"><span aria-hidden="true"></span>{{ state }}</span>
-{% endmacro status %}
+{% endcomponent ui.status %}
 
-{% macro empty(title, message) %}
+{% component ui.empty(title: string, message: string) %}
 <div class="empty-state">
   <div class="empty-state-mark" aria-hidden="true">∅</div>
   <h3>{{ title }}</h3>
   <p>{{ message }}</p>
 </div>
-{% endmacro empty %}
+{% endcomponent ui.empty %}
 
-{% macro csrf(token="") %}
+{% component ui.csrf(token: string = "") %}
 {% if token | default(value="") %}<input type="hidden" name="csrf_token" value="{{ token }}">{% endif %}
-{% endmacro csrf %}
+{% endcomponent ui.csrf %}
 
-{% macro tag_chip(tag, href="") %}
+{% component ui.tag_chip(tag: string, href: string = "") %}
 {% if href | default(value="") %}<a class="tag-chip" href="{{ href }}">{{ tag }}</a>{% else %}<span class="tag-chip">{{ tag }}</span>{% endif %}
-{% endmacro tag_chip %}
+{% endcomponent ui.tag_chip %}
 
 {# Avatar: uploaded image when a URL is present, otherwise deterministic
    initials. The generated tone is `user_id % 6` and must stay in range for
    the `.avatar-tone-*` classes in app.css. #}
-{% macro avatar(name, avatar_url="", user_id=0, size="sm") %}
+{% component ui.avatar(name: string, avatar_url: string = "", user_id: integer = 0, size: string = "sm") %}
 {% if avatar_url | default(value="") %}
 <img class="avatar avatar-{{ size }}" src="{{ avatar_url }}" alt="" loading="lazy" decoding="async">
 {% else %}
 <span class="avatar avatar-{{ size }} avatar-generated avatar-tone-{{ user_id % 6 }}" aria-hidden="true">{{ name | default(value="?") | truncate(length=1, end="") | upper }}</span>
 {% endif %}
-{% endmacro avatar %}
+{% endcomponent ui.avatar %}

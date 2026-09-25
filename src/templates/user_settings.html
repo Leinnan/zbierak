@@ -1,5 +1,4 @@
 {% extends "base.html" %}
-{% import "fragments/ui.html" as ui %}
 {% block title %}{{ profile.display_name }} · User settings · {{ app_name | default(value="Zbierak") }}{% endblock title %}
 {% block content %}
 <header class="page-heading">
@@ -20,7 +19,7 @@
         <div class="card-header"><div><h3 class="card-title">Display name and avatar</h3><p>The name appears on comments and membership; the avatar shows across the operator UI.</p></div></div>
         <div class="card-body">
           <div class="d-flex align-items-center gap-3 mb-3">
-            {% if profile.avatar %}{{ ui::avatar(name=profile.display_name, avatar_url=profile.avatar.url, user_id=profile.id, size="lg") }}{% else %}{{ ui::avatar(name=profile.display_name, user_id=profile.id, size="lg") }}{% endif %}
+            {% if profile.avatar %}{{ <ui.avatar name={profile.display_name} avatar_url={profile.avatar.url} user_id={profile.id} size="lg" /> }}{% else %}{{ <ui.avatar name={profile.display_name} user_id={profile.id} size="lg" /> }}{% endif %}
             <div><strong>{{ profile.display_name }}</strong><div class="text-secondary">{{ profile.email }}</div></div>
           </div>
           <form class="compact-form" method="post" action="/users/{{ profile.id }}/avatar" enctype="multipart/form-data">

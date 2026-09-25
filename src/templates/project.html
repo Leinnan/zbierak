@@ -1,12 +1,11 @@
 {% extends "base.html" %}
-{% import "fragments/ui.html" as ui %}
 {% block title %}{{ project.name }} · {{ app_name | default(value="Zbierak") }}{% endblock title %}
 {% block content %}
 <nav class="breadcrumb-line" aria-label="Breadcrumb"><a href="/projects">Projects</a><span aria-hidden="true">/</span><span aria-current="page">{{ project.name }}</span></nav>
 
 <header class="page-heading project-heading">
   <div>
-    <div class="d-flex flex-wrap align-items-center gap-2"><h1>{{ project.name }}</h1><span class="role-badge">{{ project.role }}</span> {{ ui::status(value=project.status) }}</div>
+    <div class="d-flex flex-wrap align-items-center gap-2"><h1>{{ project.name }}</h1><span class="role-badge">{{ project.role }}</span> {{ <ui.status value={project.status} /> }}</div>
     <p>{% if project.description %}{{ project.description }} · {% endif %}<code>{{ project.slug }}</code> · Created <time class="js-local-time" data-unix="{{ project.created_at }}">{{ project.created_at }}</time></p>
   </div>
   <a class="btn btn-outline-secondary" href="#access">Manage access</a>
@@ -92,7 +91,7 @@
       <div class="card-header"><div><h3 class="card-title">Members</h3><p>People who can inspect and manage this project.</p></div></div>
       <div class="list-group list-group-flush">
         {% for member in members | default(value=[]) %}
-        <div class="list-group-item management-row"><div class="user-summary">{% if member.avatar_url %}{{ ui::avatar(name=member.display_name, avatar_url=member.avatar_url, user_id=member.id) }}{% else %}{{ ui::avatar(name=member.display_name, user_id=member.id) }}{% endif %}<span><strong>{{ member.display_name }}</strong><small>{{ member.email }}</small></span></div><span class="role-badge">{{ member.role }}</span></div>
+        <div class="list-group-item management-row"><div class="user-summary">{% if member.avatar_url %}{{ <ui.avatar name={member.display_name} avatar_url={member.avatar_url} user_id={member.id} /> }}{% else %}{{ <ui.avatar name={member.display_name} user_id={member.id} /> }}{% endif %}<span><strong>{{ member.display_name }}</strong><small>{{ member.email }}</small></span></div><span class="role-badge">{{ member.role }}</span></div>
         {% else %}
         <div class="list-group-item text-secondary">No members were returned.</div>
         {% endfor %}
