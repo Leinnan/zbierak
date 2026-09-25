@@ -6,14 +6,14 @@
 #![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![allow(missing_docs)]
 
-use std::{path::PathBuf, sync::Arc};
+use std::sync::Arc;
 
 use axum::{Router, body::Body, http::Request};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
 use tower::ServiceExt;
-use zbierak::{AppState, Config, SystemResolver, router, token_hash};
+use zbierak::{AppState, AssetSource, Config, SystemResolver, router, token_hash};
 
 pub async fn test_pool() -> SqlitePool {
     let db = SqlitePoolOptions::new()
@@ -31,8 +31,8 @@ pub fn test_config() -> Config {
         database_url: "sqlite::memory:".into(),
         cookie_secure: false,
         session_days: 30,
-        static_dir: PathBuf::from("src/static"),
-        template_dir: PathBuf::from("src/templates"),
+        static_dir: AssetSource::Embedded,
+        template_dir: AssetSource::Embedded,
         webhook_key: None,
     }
 }
@@ -69,12 +69,7 @@ pub fn app_with_templates_and_config(db: SqlitePool, config: Config) -> Router {
 }
 
 pub fn app_with(db: SqlitePool, config: Config, resolver: Arc<dyn zbierak::Resolver>) -> Router {
-    let templates = zbierak::load_templates(
-        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("src/templates")
-            .as_path(),
-    )
-    .unwrap();
+    let templates = zbierak::load_templates(&AssetSource::Embedded).unwrap();
     let state = AppState {
         config: Arc::new(config),
         db,

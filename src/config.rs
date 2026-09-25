@@ -6,6 +6,18 @@ use std::{
 
 use crate::{AppError, AppResult};
 
+/// Where a class of runtime assets (templates, static files) is loaded from.
+///
+/// Assets are embedded in the binary by default; a filesystem directory is
+/// only used when the matching environment variable names an existing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AssetSource {
+    /// Assets embedded in the binary at build time.
+    Embedded,
+    /// A filesystem directory overriding the embedded assets.
+    Directory(PathBuf),
+}
+
 /// Runtime configuration, loaded from the environment by [`Config::from_env`].
 #[derive(Debug)]
 pub struct Config {
@@ -17,12 +29,23 @@ pub struct Config {
     pub cookie_secure: bool,
     /// Session lifetime in days (`ZBIERAK_SESSION_DAYS`, 1-365).
     pub session_days: i64,
-    /// Directory for static assets (`ZBIERAK_STATIC_DIR`).
-    pub static_dir: PathBuf,
-    /// Directory for Tera templates (`ZBIERAK_TEMPLATE_DIR`).
-    pub template_dir: PathBuf,
+    /// Where static assets are loaded from (`ZBIERAK_STATIC_DIR`).
+    pub static_dir: AssetSource,
+    /// Where Tera templates are loaded from (`ZBIERAK_TEMPLATE_DIR`).
+    pub template_dir: AssetSource,
     /// Master key encrypting webhook signing secrets at rest.
     pub webhook_key: Option<[u8; 32]>,
+}
+
+impl AssetSource {
+    /// Short human-readable description safe for startup logs.
+    #[must_use]
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Embedded => "embedded".into(),
+            Self::Directory(path) => format!("directory {}", path.display()),
+        }
+    }
 }
 
 impl Config {
@@ -72,10 +95,31 @@ impl Config {
             database_url,
             cookie_secure,
             session_days,
-            static_dir: resolve_asset_dir("ZBIERAK_STATIC_DIR", "static"),
-            template_dir: resolve_asset_dir("ZBIERAK_TEMPLATE_DIR", "templates"),
+            static_dir: resolve_asset_dir("ZBIERAK_STATIC_DIR"),
+            template_dir: resolve_asset_dir("ZBIERAK_TEMPLATE_DIR"),
             webhook_key,
         })
+    }
+
+    /// One-line, secret-free description of the effective configuration for
+    /// startup logs. Never include `webhook_key` material.
+    #[must_use]
+    pub fn summary(&self) -> String {
+        format!(
+            "version {}, listen {}, database {}, cookie_secure {}, session_days {}, templates: {}, static: {}, webhook_key: {}",
+            env!("CARGO_PKG_VERSION"),
+            self.bind,
+            self.database_url,
+            self.cookie_secure,
+            self.session_days,
+            self.template_dir.describe(),
+            self.static_dir.describe(),
+            if self.webhook_key.is_some() {
+                "present"
+            } else {
+                "absent"
+            }
+        )
     }
 }
 
@@ -105,22 +149,27 @@ fn normalize_database_url_for(url: String, data_dir_present: bool) -> String {
     }
 }
 
-fn resolve_asset_dir(variable: &str, name: &str) -> PathBuf {
-    if let Ok(value) = env::var(variable) {
-        let path = PathBuf::from(value);
-        if path.is_dir() {
-            return path;
-        }
+/// Resolves an asset source: the configured directory when the variable names
+/// an existing one, embedded assets otherwise. A set-but-invalid variable is
+/// reported loudly (warning with the ignored path) instead of being silently
+/// dropped, but it no longer prevents startup.
+fn resolve_asset_dir(variable: &str) -> AssetSource {
+    match env::var(variable) {
+        Ok(value) => asset_source_for(variable, &value),
+        Err(_) => AssetSource::Embedded,
     }
-    asset_dir(name)
 }
 
-fn asset_dir(name: &str) -> PathBuf {
-    let deployed = PathBuf::from(name);
-    if deployed.is_dir() {
-        deployed
+fn asset_source_for(variable: &str, value: &str) -> AssetSource {
+    if Path::new(value).is_dir() {
+        AssetSource::Directory(PathBuf::from(value))
     } else {
-        PathBuf::from("src").join(name)
+        tracing::warn!(
+            variable,
+            path = %value,
+            "environment variable names a missing directory; falling back to embedded assets"
+        );
+        AssetSource::Embedded
     }
 }
 
@@ -140,7 +189,9 @@ fn parse_bool(name: &str, default: bool) -> AppResult<bool> {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
 
-    use super::normalize_database_url_for;
+    use std::net::SocketAddr;
+
+    use super::{AssetSource, Config, asset_source_for, normalize_database_url_for};
 
     #[test]
     fn container_data_url_falls_back_without_data_dir() {
@@ -167,5 +218,73 @@ mod tests {
         ] {
             assert_eq!(normalize_database_url_for(url.into(), false), url);
         }
+    }
+
+    #[test]
+    fn valid_directory_override_is_used() {
+        let directory = tempfile::tempdir().unwrap();
+        assert_eq!(
+            asset_source_for("ZBIERAK_TEST_DIR", directory.path().to_str().unwrap()),
+            AssetSource::Directory(directory.path().to_path_buf())
+        );
+    }
+
+    #[test]
+    fn missing_directory_override_falls_back_to_embedded() {
+        assert_eq!(
+            asset_source_for("ZBIERAK_TEST_DIR", "/no/such/dir/zbierak"),
+            AssetSource::Embedded
+        );
+    }
+
+    fn sample_config(webhook_key: Option<[u8; 32]>) -> Config {
+        Config {
+            bind: "127.0.0.1:3000".parse::<SocketAddr>().unwrap(),
+            database_url: "sqlite://data/zbierak.db".into(),
+            cookie_secure: true,
+            session_days: 30,
+            static_dir: AssetSource::Embedded,
+            template_dir: AssetSource::Embedded,
+            webhook_key,
+        }
+    }
+
+    #[test]
+    fn summary_names_every_relevant_setting() {
+        let summary = sample_config(None).summary();
+        for needle in [
+            "127.0.0.1:3000",
+            "sqlite://data/zbierak.db",
+            "cookie_secure true",
+            "session_days 30",
+            "templates: embedded",
+            "static: embedded",
+            "webhook_key: absent",
+        ] {
+            assert!(
+                summary.contains(needle),
+                "summary missing {needle}: {summary}"
+            );
+        }
+    }
+
+    #[test]
+    fn summary_never_contains_key_material() {
+        let mut key = [7_u8; 32];
+        key[0] = 0xAB;
+        let config = sample_config(Some(key));
+        let summary = config.summary();
+        assert!(summary.contains("webhook_key: present"));
+        assert!(!summary.contains("171"));
+        assert!(!summary.contains(&format!("{key:?}")));
+    }
+
+    #[test]
+    fn asset_source_describe_renders_both_variants() {
+        assert_eq!(AssetSource::Embedded.describe(), "embedded");
+        assert_eq!(
+            AssetSource::Directory(std::path::PathBuf::from("/app/static")).describe(),
+            "directory /app/static"
+        );
     }
 }

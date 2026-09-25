@@ -11,6 +11,7 @@
 //! server, testing, and operational tooling.
 
 mod api_error;
+mod assets;
 mod audit;
 mod auth;
 mod avatars;
@@ -31,7 +32,7 @@ mod secrets;
 pub use secrets::{decrypt, encrypt, generate_key, parse_key};
 mod tags;
 
-use std::{future::Future, sync::Arc};
+use std::{env, future::Future, sync::Arc};
 
 use axum::{
     Router,
@@ -52,7 +53,7 @@ use extractors::FORM_BODY_LIMIT;
 use crate::api_error::ApiError;
 
 pub use auth::{hash_password, token_hash, verify_password};
-pub use config::Config;
+pub use config::{AssetSource, Config};
 pub use error::{AppError, AppResult};
 
 /// Shared request state handed to every handler and background worker.
@@ -241,8 +242,34 @@ pub fn router(state: AppState) -> Router {
     app
 }
 
+/// Installs the process-wide tracing subscriber.
+///
+/// Reads `RUST_LOG` (`EnvFilter` syntax). A missing variable selects the
+/// default `zbierak=info`; a set-but-invalid value is reported on stderr and
+/// also falls back to the default, so operators notice when their verbosity
+/// setting is not taking effect instead of debugging a silent filter.
+pub fn init_logging() {
+    let default_filter = tracing_subscriber::EnvFilter::new("zbierak=info");
+    let filter = match env::var("RUST_LOG") {
+        Err(_) => default_filter,
+        Ok(raw) => match tracing_subscriber::EnvFilter::try_new(raw) {
+            Ok(filter) => filter,
+            Err(error) => {
+                eprintln!(
+                    "zbierak: ignoring invalid RUST_LOG ({error}); using default zbierak=info"
+                );
+                default_filter
+            }
+        },
+    };
+    tracing_subscriber::fmt().with_env_filter(filter).init();
+}
+
 /// Runs the server binary: loads configuration, connects to the database,
 /// renders the template check, and serves until shutdown.
+///
+/// Call [`init_logging`] first; this function logs the outcome of every
+/// startup phase so a fatal error can be located from the journal alone.
 ///
 /// # Errors
 ///
@@ -251,15 +278,20 @@ pub fn router(state: AppState) -> Router {
 /// or the listener cannot be bound.
 pub async fn run() -> AppResult<()> {
     dotenvy::dotenv().ok();
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "zbierak=info".into()),
-        )
-        .init();
+    tracing::info!("starting zbierak {}", env!("CARGO_PKG_VERSION"));
 
+    tracing::info!("loading configuration");
     let config = Arc::new(Config::from_env()?);
+    tracing::info!(summary = %config.summary(), "configuration loaded");
+
+    tracing::info!(database = %config.database_url, "connecting to database");
     let db = db::connect(&config.database_url).await?;
+    tracing::info!("database ready (migrations applied)");
+
+    tracing::info!(
+        templates = %config.template_dir.describe(),
+        "loading templates"
+    );
     let templates = Arc::new(load_templates(&config.template_dir)?);
     let state = AppState {
         config: config.clone(),
@@ -268,6 +300,7 @@ pub async fn run() -> AppResult<()> {
         resolver: Arc::new(net_policy::SystemResolver),
     };
 
+    tracing::info!(address = %config.bind, "binding listener");
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
     let worker = tokio::spawn(outbox::run(state.clone(), shutdown_rx));
     let listener = TcpListener::bind(config.bind).await?;
@@ -276,23 +309,42 @@ pub async fn run() -> AppResult<()> {
     axum::serve(listener, router(state))
         .with_graceful_shutdown(shutdown_signal(terminate))
         .await?;
+    tracing::info!("shutdown requested; stopping outbox worker");
     let _ = shutdown_tx.send(true);
     let _ = worker.await;
+    tracing::info!("shutdown complete");
     Ok(())
 }
 
-/// Loads the operator-UI templates from `directory` and registers the
-/// application's custom Tera filters.
+/// Template names that must be present for the operator UI to render.
+const REQUIRED_TEMPLATES: [&str; 11] = [
+    "base.html",
+    "login.html",
+    "bootstrap.html",
+    "projects.html",
+    "project.html",
+    "issue.html",
+    "settings.html",
+    "users.html",
+    "user.html",
+    "user_settings.html",
+    "error.html",
+];
+
+/// Loads the operator-UI templates from the configured [`AssetSource`] and
+/// registers the application's custom Tera filters.
 ///
-/// Tera 2 removed the built-in `urlencode` filter (formerly gated behind the
-/// `builtins` feature), so it is provided here; templates rely on it to
-/// percent-encode tag values into query-string links.
+/// Embedded assets ship inside the binary, so a bare deployment needs no
+/// template directory on disk. Tera 2 removed the built-in `urlencode`
+/// filter (formerly gated behind the `builtins` feature), so it is provided
+/// here; templates rely on it to percent-encode tag values into
+/// query-string links.
 ///
 /// # Errors
 ///
-/// Returns [`AppError::Config`] when the glob fails to parse any template or
-/// a required template is missing.
-pub fn load_templates(directory: &std::path::Path) -> AppResult<Tera> {
+/// Returns [`AppError::Config`] when a filesystem override fails to parse or
+/// a required template is missing from the resolved source.
+pub fn load_templates(source: &AssetSource) -> AppResult<Tera> {
     fn urlencode(value: &str, _: tera::Kwargs, _: &tera::State) -> String {
         let mut encoded = String::with_capacity(value.len());
         for byte in value.bytes() {
@@ -308,27 +360,31 @@ pub fn load_templates(directory: &std::path::Path) -> AppResult<Tera> {
         encoded
     }
 
-    let pattern = format!("{}/**/*.html", directory.display());
     let mut tera = Tera::new();
     tera.register_filter("urlencode", urlencode);
-    tera.load_from_glob(&pattern)?;
-    for name in [
-        "base.html",
-        "login.html",
-        "bootstrap.html",
-        "projects.html",
-        "project.html",
-        "issue.html",
-        "settings.html",
-        "users.html",
-        "user.html",
-        "user_settings.html",
-        "error.html",
-    ] {
+    match source {
+        AssetSource::Directory(directory) => {
+            let pattern = format!("{}/**/*.html", directory.display());
+            tera.load_from_glob(&pattern)?;
+        }
+        AssetSource::Embedded => {
+            // Bulk-insert everything before validation runs: base.html
+            // includes fragments/* and imports components from
+            // fragments/ui.html, and per-template registration would reject
+            // those forward references.
+            tera.add_raw_templates(assets::html_templates())?;
+        }
+    }
+    for name in REQUIRED_TEMPLATES {
         if !tera.contains_template(name) {
+            let location = match source {
+                AssetSource::Directory(directory) => {
+                    format!("{}/{name}", directory.display())
+                }
+                AssetSource::Embedded => format!("embedded templates ({name})"),
+            };
             return Err(AppError::Config(format!(
-                "required template {}/{name} is missing",
-                directory.display()
+                "required template {location} is missing"
             )));
         }
     }
@@ -391,7 +447,7 @@ async fn shutdown_signal(terminate: BoxShutdownSignal) {
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
 
-    use std::{path::PathBuf, sync::Arc};
+    use std::sync::Arc;
 
     use axum::{
         body::Body,
@@ -401,7 +457,7 @@ mod tests {
     use sqlx::sqlite::SqlitePoolOptions;
     use tower::ServiceExt;
 
-    use super::{AppState, Config, router};
+    use super::{AppError, AppState, AssetSource, Config, router};
 
     fn test_state(db: sqlx::SqlitePool) -> AppState {
         AppState {
@@ -410,14 +466,35 @@ mod tests {
                 database_url: "sqlite::memory:".into(),
                 cookie_secure: false,
                 session_days: 30,
-                static_dir: PathBuf::from("src/static"),
-                template_dir: PathBuf::from("src/templates"),
+                static_dir: AssetSource::Embedded,
+                template_dir: AssetSource::Embedded,
                 webhook_key: None,
             }),
             db,
             templates: Arc::new(tera::Tera::default()),
             resolver: Arc::new(super::SystemResolver),
         }
+    }
+
+    #[test]
+    fn embedded_templates_load_into_tera() {
+        let tera = super::load_templates(&AssetSource::Embedded).unwrap();
+        for name in super::REQUIRED_TEMPLATES {
+            assert!(tera.contains_template(name), "missing {name}");
+        }
+    }
+
+    #[test]
+    fn directory_templates_override_embedded() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("base.html"), "<html></html>").unwrap();
+        let source = AssetSource::Directory(directory.path().to_path_buf());
+        let result = super::load_templates(&source);
+        assert!(
+            matches!(&result, Err(AppError::Config(message))
+                if message.contains("login.html") && message.contains("is missing")),
+            "expected a missing-template error, got {result:?}"
+        );
     }
 
     #[tokio::test]

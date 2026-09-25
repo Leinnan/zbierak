@@ -56,6 +56,75 @@ Compose publishes the service on loopback by default. Set
 `ZBIERAK_PUBLISH_ADDRESS=0.0.0.0` only when a firewall or reverse proxy controls
 access.
 
+## Systemd Deployment
+
+The binary is self-contained: templates and static assets are embedded at build
+time, so installing `/usr/local/bin/zbierak` plus a state directory is a
+complete deployment.
+
+```sh
+cargo build --release
+install -Dm0755 target/release/zbierak /usr/local/bin/zbierak
+useradd --system --home-dir /var/lib/zbierak --create-home zbierak
+```
+
+Example unit (`/etc/systemd/system/zbierak.service`):
+
+```ini
+[Unit]
+Description=zbierak error collection services
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=zbierak
+Group=zbierak
+WorkingDirectory=/var/lib/zbierak
+StateDirectory=zbierak
+EnvironmentFile=/var/lib/zbierak/.env
+Environment=RUST_LOG=zbierak=info
+ExecStart=/usr/local/bin/zbierak
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=15s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+The hardening block from an existing unit can be kept as-is; it is compatible
+with the embedded assets. Remove `ZBIERAK_STATIC_DIR`/`ZBIERAK_TEMPLATE_DIR`
+entries unless you deliberately override assets from disk.
+
+### Diagnosing Startup Failures
+
+The process logs each startup phase (configuration, database, templates,
+listener) plus a redacted configuration summary, so `journalctl` alone shows
+where a start failed:
+
+```sh
+journalctl -u zbierak -n 100 --no-pager   # includes the fatal error chain
+systemctl cat zbierak                     # confirm which unit file is loaded
+```
+
+To see the failure without systemd, run the binary under the service identity:
+
+```sh
+sudo -u zbierak sh -c 'cd /var/lib/zbierak && RUST_LOG=zbierak=debug /usr/local/bin/zbierak'
+```
+
+Common first-boot failures:
+
+| Symptom in the journal | Cause and fix |
+| --- | --- |
+| `invalid ZBIERAK_LISTEN_ADDR` | Unparseable address in `.env`; use `host:port` such as `127.0.0.1:3000` |
+| `ZBIERAK_DATABASE_URL must be a SQLite URL` | URL must start with `sqlite:` |
+| `ZBIERAK_SESSION_DAYS must be between 1 and 365` | Out-of-range value in `.env` |
+| `ZBIERAK_SECRET_KEY must decode to 32 bytes` | Regenerate with `openssl rand -base64 32` |
+| `caused by: Permission denied` / `readonly` | The SQLite path is not writable by the `zbierak` user (check `ReadWritePaths` and `StateDirectory`) |
+| `Failed to load environment files` | `EnvironmentFile` path wrong or syntax invalid; systemd refuses to start before the binary runs |
+
 ## Configuration
 
 Copy `.env.example` to `.env`. The container accepts these variables:
@@ -67,19 +136,23 @@ Copy `.env.example` to `.env`. The container accepts these variables:
 | `ZBIERAK_DATABASE_URL` | SQLx SQLite URL | `sqlite:///data/zbierak.db?mode=rwc` |
 | `ZBIERAK_COOKIE_SECURE` | Add `Secure` to the session cookie (`true`, `false`, `1`, `0`, `yes`, or `no`) | `false` |
 | `ZBIERAK_SESSION_DAYS` | Session lifetime, from 1 through 365 days | `30` |
-| `ZBIERAK_STATIC_DIR` | Static asset directory | `/app/static` |
-| `ZBIERAK_TEMPLATE_DIR` | Tera template directory | `/app/templates` |
-| `RUST_LOG` | `tracing-subscriber` filter | `zbierak=info,tower_http=info` |
+| `ZBIERAK_STATIC_DIR` | Optional static asset directory override | embedded |
+| `ZBIERAK_TEMPLATE_DIR` | Optional Tera template directory override | embedded |
+| `RUST_LOG` | `tracing-subscriber` EnvFilter | `zbierak=info` |
 
 Set `ZBIERAK_COOKIE_SECURE=true` whenever users access Zbierak over HTTPS. The
 application uses an opaque random session token stored as a SHA-256 hash in
 SQLite. The cookie is HTTP-only and `SameSite=Lax`; its lifetime is controlled by
 `ZBIERAK_SESSION_DAYS`.
 
-For source runs, asset discovery uses `./templates` or `./static` when present,
-then falls back to `src/templates` and `src/static`. The two directory variables
-override discovery. `ZBIERAK_BIND` and `DATABASE_URL` remain accepted as legacy
-fallbacks when their namespaced equivalents are absent.
+Templates and static assets are embedded in the binary at build time, so a
+deployment needs only the executable. `ZBIERAK_STATIC_DIR` and
+`ZBIERAK_TEMPLATE_DIR` remain available as optional overrides for development
+and theming: when a variable names an existing directory its files are used,
+otherwise the embedded assets are served and a warning is logged. Startup also
+logs the effective configuration (listen address, database URL, asset sources)
+with all secrets redacted. `ZBIERAK_BIND` and `DATABASE_URL` remain accepted as
+legacy fallbacks when their namespaced equivalents are absent.
 
 `GET /health` is a process liveness response. `GET /ready` also executes
 `SELECT 1` against SQLite and is used by the container health check.

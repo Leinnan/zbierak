@@ -11,8 +11,6 @@ services:
       ZBIERAK_DATABASE_URL: ${ZBIERAK_DATABASE_URL:-sqlite:///data/zbierak.db?mode=rwc}
       ZBIERAK_COOKIE_SECURE: ${ZBIERAK_COOKIE_SECURE:-false}
       ZBIERAK_SESSION_DAYS: ${ZBIERAK_SESSION_DAYS:-30}
-      ZBIERAK_STATIC_DIR: ${ZBIERAK_STATIC_DIR:-/app/static}
-      ZBIERAK_TEMPLATE_DIR: ${ZBIERAK_TEMPLATE_DIR:-/app/templates}
       ZBIERAK_SECRET_KEY: ${ZBIERAK_SECRET_KEY:-}
       RUST_LOG: ${RUST_LOG:-zbierak=info}
     ports:

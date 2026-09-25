@@ -20,9 +20,10 @@ use uuid::Uuid;
 use crate::{
     AppError, AppResult, AppState,
     api_error::ApiError,
-    audit,
+    assets, audit,
     auth::{self, User},
     avatars,
+    config::AssetSource,
     domain::{IssueStatus, ProjectRole},
     extractors::{
         ApiEventBody, ApiJson, ApiPath, ApiPrincipal, ApiQuery, IngestProject, UiForm, UiMultipart,
@@ -2753,24 +2754,43 @@ pub async fn serve_avatar(
 
 pub async fn static_asset(
     State(state): State<AppState>,
-    AxumPath(path): AxumPath<String>,
+    AxumPath(request_path): AxumPath<String>,
 ) -> AppResult<Response> {
-    let path = Path::new(&path);
+    let path = Path::new(&request_path);
     if path
         .components()
         .any(|part| !matches!(part, Component::Normal(_)))
     {
         return Err(AppError::NotFound);
     }
-    let full_path = state.config.static_dir.join(path);
-    let bytes = tokio::fs::read(&full_path).await.map_err(|error| {
-        if error.kind() == std::io::ErrorKind::NotFound {
-            AppError::NotFound
-        } else {
-            error.into()
+    // Assets ship embedded in the binary; a configured directory overrides
+    // them for development and theming.
+    let (bytes, extension) = match &state.config.static_dir {
+        AssetSource::Directory(directory) => {
+            let full_path = directory.join(path);
+            let bytes = tokio::fs::read(&full_path).await.map_err(|error| {
+                if error.kind() == std::io::ErrorKind::NotFound {
+                    AppError::NotFound
+                } else {
+                    error.into()
+                }
+            })?;
+            let extension = full_path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(str::to_owned);
+            (bytes, extension)
         }
-    })?;
-    let content_type = match full_path.extension().and_then(|ext| ext.to_str()) {
+        AssetSource::Embedded => {
+            let bytes = assets::static_file(request_path.as_str()).ok_or(AppError::NotFound)?;
+            let extension = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .map(str::to_owned);
+            (bytes.to_vec(), extension)
+        }
+    };
+    let content_type = match extension.as_deref() {
         Some("css") => "text/css; charset=utf-8",
         Some("js") => "text/javascript; charset=utf-8",
         Some("svg") => "image/svg+xml",

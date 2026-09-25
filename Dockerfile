@@ -21,20 +21,18 @@ RUN apt-get update && \
     groupadd --gid 10001 zbierak && \
     useradd --uid 10001 --gid 10001 --no-create-home --home-dir /app \
       --shell /usr/sbin/nologin zbierak && \
-    mkdir -p /app/templates /app/static /data && \
+    mkdir -p /app /data && \
     chown -R 10001:10001 /app /data
 
 WORKDIR /app
+# Templates and static assets are embedded in the binary, so the runtime
+# image needs nothing but the executable itself.
 COPY --from=builder --chown=10001:10001 /out/zbierak /usr/local/bin/zbierak
-COPY --from=builder --chown=10001:10001 /app/src/templates/ /app/templates/
-COPY --from=builder --chown=10001:10001 /app/src/static/ /app/static/
 
 ENV ZBIERAK_LISTEN_ADDR=0.0.0.0:3000 \
     ZBIERAK_DATABASE_URL=sqlite:///data/zbierak.db?mode=rwc \
     ZBIERAK_COOKIE_SECURE=false \
     ZBIERAK_SESSION_DAYS=30 \
-    ZBIERAK_STATIC_DIR=/app/static \
-    ZBIERAK_TEMPLATE_DIR=/app/templates \
     RUST_LOG=zbierak=info
 
 USER 10001:10001

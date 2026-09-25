@@ -19,6 +19,7 @@ chacha20poly1305 = "0.11.0"
 dotenvy = "0.15"
 hmac = "0.13"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+include_dir = "0.7"
 pulldown-cmark = "0.13.4"
 rand = "0.10"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
@@ -43,6 +44,7 @@ zbierak-protocol = { path = "crates/zbierak-protocol" }
 [dev-dependencies]
 http-body-util = "0.1"
 image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
+tempfile = "3.27.0"
 tower = { version = "0.5", features = ["util"] }
 
 # Workspace-wide lint policy, inherited by every member through

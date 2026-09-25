@@ -21,6 +21,7 @@ struct Delivery {
 }
 
 pub async fn run(state: AppState, mut shutdown: watch::Receiver<bool>) {
+    tracing::debug!("outbox worker started");
     loop {
         if *shutdown.borrow() {
             break;
@@ -39,6 +40,7 @@ pub async fn run(state: AppState, mut shutdown: watch::Receiver<bool>) {
             }
         }
     }
+    tracing::debug!("outbox worker stopped");
 }
 
 async fn claim(state: &AppState) -> AppResult<Option<Delivery>> {

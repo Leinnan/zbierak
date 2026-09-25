@@ -204,18 +204,24 @@ separates it from potential future work.
 
 - The Docker build copies the complete workspace, so both local path crates are
   available during the package build.
-- The runtime image includes the binary, templates at `/app/templates`, and
-  static files at `/app/static`, uses `/app` as its working directory, and runs
-  as UID/GID `10001`.
+- Templates and static assets are embedded in the binary at build time
+  (`include_dir`), so the runtime image only needs the executable; it uses
+  `/app` as its working directory and runs as UID/GID `10001`.
+  `ZBIERAK_TEMPLATE_DIR`/`ZBIERAK_STATIC_DIR` remain optional filesystem
+  overrides; a variable naming a missing directory falls back to the embedded
+  assets with a warning.
 - The image configures the namespaced listener, database, cookie, session,
-  template, static-directory, and webhook-secret-key variables read directly by
-  the binary.
+  and webhook-secret-key variables read directly by the binary.
 - Compose persists `/data`, publishes to loopback by default, uses a read-only
   root filesystem and writable `/tmp`, drops all capabilities, and prevents
   privilege escalation.
 - Tabler 1.4.0, htmx 2.0.7, and EasyMDE 2.21.0 are vendored under
-  `src/static/vendor`. The UI uses local files only, and
-  `src/static/THIRD_PARTY_NOTICES` carries their notices.
+  `src/static/vendor` and embedded into the binary. The UI uses local files
+  only, and `src/static/THIRD_PARTY_NOTICES` carries their notices.
+- Startup logs one line per phase (configuration, database, templates,
+  listener) plus a redacted configuration summary; fatal errors print the
+  full cause chain, and a panic hook makes background-task panics visible in
+  the journal.
 - The justfile provides manual `backup` and `restore` recipes that archive and
   restore the data volume while the service is stopped.
 
