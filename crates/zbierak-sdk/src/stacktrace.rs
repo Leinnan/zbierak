@@ -34,14 +34,25 @@ pub(crate) fn capture_frames() -> Vec<StackFrame> {
     frames
 }
 
-/// True for frames that belong to the Rust runtime or this SDK rather than
-/// application code. Matched on demangled paths to stay independent of
-/// optimization-level-dependent inlining.
+/// True for frames that belong to the Rust runtime, this SDK, or the
+/// stack-capture machinery rather than application code. Matched on demangled
+/// paths to stay independent of optimization-level-dependent inlining.
 fn is_internal_frame(function: &str) -> bool {
+    // v0-mangled generics demangle with leading `<...>`; look past them so
+    // `<backtrace[hash]::capture::Backtrace>::new` is still recognized.
+    let function = function.trim_start_matches('<');
     function.starts_with("zbierak_sdk")
         || function.starts_with("std::panicking")
         || function.starts_with("core::panicking")
-        || function.starts_with("<alloc::boxed::Box<")
+        // Capture machinery unwound through while collecting IPs. The
+        // bracketed form is the v0-mangled `backtrace[hash]::` demangling.
+        || function.starts_with("backtrace")
+        || function.starts_with("gimli")
+        || function.starts_with("addr2line")
+        // Scoped to avoid swallowing unrelated crates like `object_store`.
+        || function.starts_with("object[")
+        || function.starts_with("object::")
+        || function.starts_with("alloc::boxed::Box<")
 }
 
 /// Converts one resolved symbol into a protocol frame.
@@ -122,5 +133,23 @@ mod tests {
             assert!(is_internal_frame(name), "not filtered: {name}");
         }
         assert!(!is_internal_frame("store::checkout::charge"));
+    }
+
+    #[test]
+    fn symbolizer_machinery_frames_are_filtered() {
+        for name in [
+            "backtrace[38f1211cc00854]::backtrace::trace::<<Backtrace as Foo>::Bar>::{closure#0}",
+            "<backtrace[38f1211cc00854]::capture::Backtrace>::new",
+            "backtrace::capture::Backtrace::create",
+            "gimli[38f1211cc00854]::read::eval::Evaluation::run",
+            "addr2line::context::FrameIter::next",
+            "object[38f1211cc00854]::read::elf::file::ElfFile::parse",
+            "object::read::macho::MachOFile::parse",
+        ] {
+            assert!(is_internal_frame(name), "not filtered: {name}");
+        }
+        // Names that merely share a prefix with the machinery stay visible.
+        assert!(!is_internal_frame("backend::app::route"));
+        assert!(!is_internal_frame("object_store::tree::walk"));
     }
 }
