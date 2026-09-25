@@ -1,9 +1,23 @@
+//! Zbierak: a self-hosted error and crash collection service.
+//!
+//! The binary serves an operator UI for issue triage and a versioned JSON
+//! API (`/api/v1`) for event ingestion and issue management, backed by
+//! SQLite. Events are grouped into issues by fingerprint, notifications are
+//! delivered asynchronously through an outbox worker, and outbound webhook
+//! destinations are validated against the destination policy.
+//!
+//! The externally re-exported items ([`Config`], [`AppState`], [`AppError`],
+//! the authentication helpers, and the resolver types) support embedding the
+//! server, testing, and operational tooling.
+
 mod api_error;
 mod audit;
 mod auth;
 mod config;
 mod db;
+mod domain;
 mod error;
+pub mod extractors;
 mod fingerprint;
 mod handlers;
 mod net_policy;
@@ -15,12 +29,13 @@ mod secrets;
 pub use secrets::{decrypt, encrypt, generate_key, parse_key};
 mod tags;
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, sync::Arc};
 
 use axum::{
     Router,
     body::Body,
-    http::{HeaderName, HeaderValue, Request},
+    extract::{DefaultBodyLimit, Request},
+    http::{HeaderName, HeaderValue},
     middleware::{self, Next},
     response::Response,
     routing::{get, post, put},
@@ -30,21 +45,34 @@ use tera::Tera;
 use tokio::{net::TcpListener, sync::watch};
 use tower_cookies::CookieManagerLayer;
 
+use extractors::FORM_BODY_LIMIT;
+
+use crate::api_error::ApiError;
+
 pub use auth::{hash_password, token_hash, verify_password};
 pub use config::Config;
 pub use error::{AppError, AppResult};
 
+/// Shared request state handed to every handler and background worker.
+///
+/// Every field is a cheap handle: configuration and templates are immutable
+/// and shared through [`Arc`], the pool is internally shared, and the
+/// resolver is a stateless trait object, so cloning `AppState` per request
+/// copies only pointers.
 #[derive(Clone)]
 pub struct AppState {
+    /// Runtime configuration loaded from the environment.
     pub config: Arc<Config>,
+    /// SQLite connection pool with migrations already applied.
     pub db: SqlitePool,
+    /// Rendered operator-UI templates.
     pub templates: Arc<Tera>,
-    pub http: reqwest::Client,
+    /// DNS strategy for outbound webhook destinations; injectable for tests.
     pub resolver: Arc<dyn net_policy::Resolver>,
 }
 
-pub fn router(state: AppState) -> Router {
-    let app = Router::new()
+fn ui_router() -> Router<AppState> {
+    Router::new()
         .route("/", get(handlers::home))
         .route(
             "/bootstrap",
@@ -106,26 +134,69 @@ pub fn router(state: AppState) -> Router {
             "/projects/{slug}/notifications/webhooks/{webhook_id}/delete",
             post(handlers::delete_webhook),
         )
-        .route("/api/v1/projects/{slug}/events", post(handlers::ingest))
-        .route("/api/v1/projects/{slug}/issues", get(handlers::list_issues))
-        .route(
-            "/api/v1/projects/{slug}/issues/{issue_id}",
-            get(handlers::get_issue),
-        )
-        .route(
-            "/api/v1/projects/{slug}/issues/{issue_id}/tags",
-            put(handlers::update_issue_tags),
-        )
         .route("/settings/tokens", post(handlers::create_api_token))
         .route(
             "/settings/tokens/{token_id}/revoke",
             post(handlers::revoke_api_token),
         )
+}
+
+fn api_router() -> Router<AppState> {
+    Router::new()
+        .route("/projects/{slug}/events", post(handlers::ingest))
+        .route("/projects/{slug}/issues", get(handlers::list_issues))
+        .route(
+            "/projects/{slug}/issues/{issue_id}",
+            get(handlers::get_issue),
+        )
+        .route(
+            "/projects/{slug}/issues/{issue_id}/tags",
+            put(handlers::update_issue_tags).layer(DefaultBodyLimit::max(FORM_BODY_LIMIT)),
+        )
+        .fallback(api_not_found)
+        .method_not_allowed_fallback(api_method_not_allowed)
+}
+
+fn system_router() -> Router<AppState> {
+    Router::new()
         .route("/health", get(handlers::health))
         .route("/ready", get(handlers::ready))
-        .route("/static/{*path}", get(handlers::static_asset))
-        .layer(middleware::from_fn(security_headers))
-        .layer(CookieManagerLayer::new())
+}
+
+fn static_router() -> Router<AppState> {
+    Router::new().route("/static/{*path}", get(handlers::static_asset))
+}
+
+async fn api_not_found() -> ApiError {
+    ApiError(AppError::NotFound)
+}
+
+async fn api_method_not_allowed() -> ApiError {
+    ApiError(AppError::MethodNotAllowed)
+}
+
+/// Builds the complete application router.
+///
+/// The operator UI, the versioned API (nested under `/api/v1` with JSON
+/// fallbacks), the system endpoints, and the static assets each live in
+/// their own subrouter so cookie handling, body limits, and fallback
+/// behavior are scoped per surface. With the `docs` feature, the `OpenAPI`
+/// document and Scalar UI are merged with their own relaxed CSP.
+pub fn router(state: AppState) -> Router {
+    let app = Router::new()
+        .merge(
+            ui_router()
+                .layer(middleware::from_fn(security_headers))
+                .layer(CookieManagerLayer::new())
+                .layer(DefaultBodyLimit::max(FORM_BODY_LIMIT)),
+        )
+        .merge(
+            Router::new()
+                .nest("/api/v1", api_router())
+                .layer(middleware::from_fn(security_headers)),
+        )
+        .merge(system_router().layer(middleware::from_fn(security_headers)))
+        .merge(static_router().layer(middleware::from_fn(security_headers)))
         .with_state(state);
 
     // Merged after the security layer so the documentation routes receive their
@@ -136,6 +207,14 @@ pub fn router(state: AppState) -> Router {
     app
 }
 
+/// Runs the server binary: loads configuration, connects to the database,
+/// renders the template check, and serves until shutdown.
+///
+/// # Errors
+///
+/// Returns an error when the environment configuration is invalid, the
+/// database cannot be reached or migrated, required templates are missing,
+/// or the listener cannot be bound.
 pub async fn run() -> AppResult<()> {
     dotenvy::dotenv().ok();
     tracing_subscriber::fmt()
@@ -152,9 +231,6 @@ pub async fn run() -> AppResult<()> {
         config: config.clone(),
         db,
         templates,
-        http: reqwest::Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()?,
         resolver: Arc::new(net_policy::SystemResolver),
     };
 
@@ -162,8 +238,9 @@ pub async fn run() -> AppResult<()> {
     let worker = tokio::spawn(outbox::run(state.clone(), shutdown_rx));
     let listener = TcpListener::bind(config.bind).await?;
     tracing::info!(address = %config.bind, "server listening");
+    let terminate = install_terminate_signal()?;
     axum::serve(listener, router(state))
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(terminate))
         .await?;
     let _ = shutdown_tx.send(true);
     let _ = worker.await;
@@ -217,24 +294,38 @@ async fn security_headers(request: Request<Body>, next: Next) -> Response {
     response
 }
 
-async fn shutdown_signal() {
+/// Future completing when the terminate signal fires.
+type BoxShutdownSignal = std::pin::Pin<Box<dyn Future<Output = ()> + Send>>;
+
+/// Registers the SIGTERM handler before serving so registration failures
+/// abort startup instead of panicking mid-request. Returns the future that
+/// completes when SIGTERM arrives.
+#[cfg(unix)]
+fn install_terminate_signal() -> AppResult<BoxShutdownSignal> {
+    use tokio::signal::unix::{SignalKind, signal};
+    let mut terminate = signal(SignalKind::terminate()).map_err(AppError::Io)?;
+    Ok(Box::pin(async move {
+        terminate.recv().await;
+    }))
+}
+
+#[cfg(not(unix))]
+fn install_terminate_signal() -> AppResult<BoxShutdownSignal> {
+    Ok(Box::pin(std::future::pending()))
+}
+
+/// Completes on Ctrl-C or SIGTERM, which triggers graceful shutdown.
+async fn shutdown_signal(terminate: BoxShutdownSignal) {
     let ctrl_c = async {
         tokio::signal::ctrl_c().await.ok();
     };
-    #[cfg(unix)]
-    let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("install SIGTERM handler")
-            .recv()
-            .await;
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! { _ = ctrl_c => {}, _ = terminate => {} }
+    tokio::select! { () = ctrl_c => {}, () = terminate => {} }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
     use std::{path::PathBuf, sync::Arc};
 
     use axum::{
@@ -246,6 +337,23 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{AppState, Config, router};
+
+    fn test_state(db: sqlx::SqlitePool) -> AppState {
+        AppState {
+            config: Arc::new(Config {
+                bind: "127.0.0.1:0".parse().unwrap(),
+                database_url: "sqlite::memory:".into(),
+                cookie_secure: false,
+                session_days: 30,
+                static_dir: PathBuf::from("src/static"),
+                template_dir: PathBuf::from("src/templates"),
+                webhook_key: None,
+            }),
+            db,
+            templates: Arc::new(tera::Tera::default()),
+            resolver: Arc::new(super::SystemResolver),
+        }
+    }
 
     #[tokio::test]
     async fn ingest_route_persists_and_groups_an_event() {
@@ -276,21 +384,7 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
-        let state = AppState {
-            config: Arc::new(Config {
-                bind: "127.0.0.1:0".parse().unwrap(),
-                database_url: "sqlite::memory:".into(),
-                cookie_secure: false,
-                session_days: 30,
-                static_dir: PathBuf::from("src/static"),
-                template_dir: PathBuf::from("src/templates"),
-                webhook_key: None,
-            }),
-            db: db.clone(),
-            templates: Arc::new(tera::Tera::default()),
-            http: reqwest::Client::new(),
-            resolver: std::sync::Arc::new(super::SystemResolver),
-        };
+        let state = test_state(db.clone());
         sqlx::query(
             "INSERT INTO notification_endpoints
              (project_id, name, kind, url, secret, created_by)
@@ -385,21 +479,7 @@ mod tests {
         .execute(&db)
         .await
         .unwrap();
-        let state = AppState {
-            config: Arc::new(Config {
-                bind: "127.0.0.1:0".parse().unwrap(),
-                database_url: "sqlite::memory:".into(),
-                cookie_secure: false,
-                session_days: 30,
-                static_dir: PathBuf::from("src/static"),
-                template_dir: PathBuf::from("src/templates"),
-                webhook_key: None,
-            }),
-            db,
-            templates: Arc::new(tera::Tera::default()),
-            http: reqwest::Client::new(),
-            resolver: std::sync::Arc::new(super::SystemResolver),
-        };
+        let state = test_state(db);
         let app = router(state);
         let invalid = r#"{"event_id":"evt-1","timestamp":"2026-09-24T12:00:00Z","message":""}"#;
         let response = app
@@ -456,49 +536,50 @@ mod tests {
             .await
             .unwrap();
         }
-        let state = AppState {
-            config: Arc::new(Config {
-                bind: "127.0.0.1:0".parse().unwrap(),
-                database_url: "sqlite::memory:".into(),
-                cookie_secure: false,
-                session_days: 30,
-                static_dir: PathBuf::from("src/static"),
-                template_dir: PathBuf::from("src/templates"),
-                webhook_key: None,
-            }),
-            db,
-            templates: Arc::new(tera::Tera::default()),
-            http: reqwest::Client::new(),
-            resolver: std::sync::Arc::new(super::SystemResolver),
-        };
+        let state = test_state(db);
 
         assert!(
-            crate::auth::require_project_role(&state, 4, "demo", "viewer")
-                .await
-                .is_ok()
+            crate::auth::require_project_role(
+                &state,
+                4,
+                "demo",
+                crate::domain::ProjectRole::Viewer
+            )
+            .await
+            .is_ok()
         );
         assert!(
-            crate::auth::require_project_role(&state, 4, "demo", "developer")
+            crate::auth::require_project_role(
+                &state,
+                4,
+                "demo",
+                crate::domain::ProjectRole::Developer
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            crate::auth::require_project_role(
+                &state,
+                3,
+                "demo",
+                crate::domain::ProjectRole::Developer
+            )
+            .await
+            .is_ok()
+        );
+        assert!(
+            crate::auth::require_project_role(&state, 3, "demo", crate::domain::ProjectRole::Admin)
                 .await
                 .is_err()
         );
         assert!(
-            crate::auth::require_project_role(&state, 3, "demo", "developer")
+            crate::auth::require_project_role(&state, 2, "demo", crate::domain::ProjectRole::Admin)
                 .await
                 .is_ok()
         );
         assert!(
-            crate::auth::require_project_role(&state, 3, "demo", "admin")
-                .await
-                .is_err()
-        );
-        assert!(
-            crate::auth::require_project_role(&state, 2, "demo", "admin")
-                .await
-                .is_ok()
-        );
-        assert!(
-            crate::auth::require_project_role(&state, 1, "demo", "owner")
+            crate::auth::require_project_role(&state, 1, "demo", crate::domain::ProjectRole::Owner)
                 .await
                 .is_ok()
         );

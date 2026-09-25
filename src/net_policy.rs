@@ -35,6 +35,7 @@ impl fmt::Display for PolicyError {
 impl std::error::Error for PolicyError {}
 
 /// Returns true when the address is safe to contact from the server.
+#[must_use]
 pub fn is_allowed_destination(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_allowed_v4(v4),
@@ -69,6 +70,9 @@ fn is_allowed_v6(ip: Ipv6Addr) -> bool {
     }
     // ::ffff:0:0/96 — judge the embedded IPv4 address instead.
     if segments[..5] == [0, 0, 0, 0, 0] && segments[5] == 0xffff {
+        // Each segment splits into exactly two octets, so the shifts below
+        // are total and the truncating casts cannot lose information.
+        #[allow(clippy::cast_possible_truncation)]
         let v4 = Ipv4Addr::new(
             (segments[6] >> 8) as u8,
             segments[6] as u8,
@@ -95,7 +99,10 @@ fn is_allowed_v6(ip: Ipv6Addr) -> bool {
 pub type BoxResolveFuture =
     std::pin::Pin<Box<dyn Future<Output = std::io::Result<Vec<IpAddr>>> + Send>>;
 
+/// Resolves hostnames for webhook destinations.
 pub trait Resolver: Send + Sync + 'static {
+    /// Resolves `host` with `port` attached, returning every address the
+    /// lookup produced (unfiltered; the policy filters separately).
     fn resolve(&self, host: String, port: u16) -> BoxResolveFuture;
 }
 
@@ -106,16 +113,22 @@ pub struct SystemResolver;
 impl Resolver for SystemResolver {
     fn resolve(&self, host: String, port: u16) -> BoxResolveFuture {
         Box::pin(async move {
-            let mut addresses = Vec::new();
-            for resolved in tokio::net::lookup_host((host.as_str(), port)).await? {
-                addresses.push(resolved.ip());
-            }
+            let addresses = tokio::net::lookup_host((host.as_str(), port))
+                .await?
+                .map(|address| address.ip())
+                .collect();
             Ok(addresses)
         })
     }
 }
 
-/// [`resolve_allowed`] with an injectable resolver for tests.
+/// Resolves a webhook destination and keeps only globally routable
+/// addresses, with the resolver injectable so tests never touch real DNS.
+///
+/// # Errors
+///
+/// Returns [`PolicyError::Resolution`] when the lookup fails and
+/// [`PolicyError::Blocked`] when no resolved address may be contacted.
 pub async fn resolve_allowed_with<F, Fut>(
     host: &str,
     port: u16,
@@ -128,12 +141,11 @@ where
     let resolved = resolve(host.to_owned(), port)
         .await
         .map_err(|error| PolicyError::Resolution(error.to_string()))?;
-    let mut allowed = Vec::new();
-    for ip in resolved {
-        if is_allowed_destination(ip) {
-            allowed.push(SocketAddr::new(ip, port));
-        }
-    }
+    let allowed: Vec<SocketAddr> = resolved
+        .into_iter()
+        .filter(|ip| is_allowed_destination(*ip))
+        .map(|ip| SocketAddr::new(ip, port))
+        .collect();
     if allowed.is_empty() {
         return Err(PolicyError::Blocked);
     }
@@ -141,7 +153,9 @@ where
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
     use super::*;
 
     fn allowed(input: &str) -> bool {

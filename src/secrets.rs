@@ -19,6 +19,11 @@ const NONCE_BYTES: usize = 12;
 const KEY_BYTES: usize = 32;
 
 /// Decodes the configured master key from its Base64 form.
+///
+/// # Errors
+///
+/// Returns an error when the input is not Base64 or does not decode to
+/// exactly 32 bytes.
 pub fn parse_key(raw: &str) -> AppResult<[u8; KEY_BYTES]> {
     let decoded = URL_SAFE_NO_PAD
         .decode(raw.trim())
@@ -34,6 +39,7 @@ pub fn parse_key(raw: &str) -> AppResult<[u8; KEY_BYTES]> {
 }
 
 /// Generates a fresh Base64 master key for operators.
+#[must_use]
 pub fn generate_key() -> String {
     let mut key = [0_u8; KEY_BYTES];
     rand::thread_rng().fill_bytes(&mut key);
@@ -67,6 +73,11 @@ fn open(key: &[u8; KEY_BYTES], nonce: &[u8; NONCE_BYTES], ciphertext: &[u8]) -> 
 }
 
 /// Encrypts a secret into its stored `v1:<nonce>:<ciphertext>` form.
+///
+/// # Errors
+///
+/// Returns an error when the underlying cipher fails, which indicates a
+/// broken build or environment rather than caller input.
 pub fn encrypt(key: &[u8; KEY_BYTES], plaintext: &str) -> AppResult<String> {
     let mut nonce = [0_u8; NONCE_BYTES];
     rand::thread_rng().fill_bytes(&mut nonce);
@@ -79,12 +90,18 @@ pub fn encrypt(key: &[u8; KEY_BYTES], plaintext: &str) -> AppResult<String> {
 }
 
 /// Decrypts a stored secret, validating the version prefix.
+///
+/// # Errors
+///
+/// Returns an error for unsupported encodings, corrupt nonce or ciphertext
+/// data, decryption failures (wrong key), and non-UTF-8 plaintext.
 pub fn decrypt(key: &[u8; KEY_BYTES], stored: &str) -> AppResult<String> {
-    let mut parts = stored.split(':');
-    let version = parts.next().unwrap_or_default();
-    let nonce_b64 = parts.next().unwrap_or_default();
-    let ciphertext_b64 = parts.next().unwrap_or_default();
-    if version != VERSION || parts.next().is_some() {
+    // The exact shape is `version:nonce:ciphertext`; anything else is
+    // rejected up front instead of defaulted field by field.
+    let [version, nonce_b64, ciphertext_b64] = stored.split(':').collect::<Vec<_>>()[..] else {
+        return Err(AppError::Config("unsupported secret encoding".into()));
+    };
+    if version != VERSION {
         return Err(AppError::Config("unsupported secret encoding".into()));
     }
     let nonce: [u8; NONCE_BYTES] = URL_SAFE_NO_PAD
@@ -101,7 +118,9 @@ pub fn decrypt(key: &[u8; KEY_BYTES], stored: &str) -> AppResult<String> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
     use super::*;
 
     #[test]

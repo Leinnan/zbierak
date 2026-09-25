@@ -6,19 +6,34 @@ use std::{
 
 use crate::{AppError, AppResult};
 
+/// Runtime configuration, loaded from the environment by [`Config::from_env`].
 #[derive(Debug)]
 pub struct Config {
+    /// Address the HTTP server binds to (`ZBIERAK_LISTEN_ADDR`).
     pub bind: SocketAddr,
+    /// SQLite connection URL (`ZBIERAK_DATABASE_URL`).
     pub database_url: String,
+    /// Whether cookies are marked `Secure` (`ZBIERAK_COOKIE_SECURE`).
     pub cookie_secure: bool,
+    /// Session lifetime in days (`ZBIERAK_SESSION_DAYS`, 1-365).
     pub session_days: i64,
+    /// Directory for static assets (`ZBIERAK_STATIC_DIR`).
     pub static_dir: PathBuf,
+    /// Directory for Tera templates (`ZBIERAK_TEMPLATE_DIR`).
     pub template_dir: PathBuf,
     /// Master key encrypting webhook signing secrets at rest.
     pub webhook_key: Option<[u8; 32]>,
 }
 
 impl Config {
+    /// Loads the configuration from environment variables, applying
+    /// defaults for anything unset.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a variable has an unparseable value, the
+    /// session lifetime is out of range, the database URL is not a SQLite
+    /// URL, or the secret key does not decode to 32 bytes.
     pub fn from_env() -> AppResult<Self> {
         let bind = preferred_env("ZBIERAK_LISTEN_ADDR", "ZBIERAK_BIND")
             .unwrap_or_else(|| "127.0.0.1:3000".into())
@@ -122,7 +137,9 @@ fn parse_bool(name: &str, default: bool) -> AppResult<bool> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
     use super::normalize_database_url_for;
 
     #[test]

@@ -1,47 +1,31 @@
-use std::{path::PathBuf, sync::Arc};
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(missing_docs)]
+
+mod common;
 
 use axum::{
     Router,
     body::Body,
     http::{Request, StatusCode},
 };
+use common::{app_with_templates, test_pool};
 use http_body_util::BodyExt;
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::SqlitePool;
 use tower::ServiceExt;
-use zbierak::{AppState, Config, hash_password, router};
+use zbierak::hash_password;
 
 const EMAIL: &str = "owner@example.com";
 const PASSWORD: &str = "correct-horse-staple-12";
 
 async fn seeded_app() -> (Router, SqlitePool) {
-    let db = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    sqlx::migrate!().run(&db).await.unwrap();
+    let db = test_pool().await;
     sqlx::query("INSERT INTO users (email, display_name, password_hash) VALUES (?, 'Owner', ?)")
         .bind(EMAIL)
         .bind(hash_password(PASSWORD).unwrap())
         .execute(&db)
         .await
         .unwrap();
-    let state = AppState {
-        config: Arc::new(Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            database_url: "sqlite::memory:".into(),
-            cookie_secure: false,
-            session_days: 30,
-            static_dir: PathBuf::from("src/static"),
-            template_dir: PathBuf::from("src/templates"),
-            webhook_key: None,
-        }),
-        db: db.clone(),
-        templates: Arc::new(tera::Tera::new("src/templates/**/*.html").unwrap()),
-        http: reqwest::Client::new(),
-        resolver: std::sync::Arc::new(zbierak::SystemResolver),
-    };
-    (router(state), db)
+    (app_with_templates(db.clone()), db)
 }
 
 /// Performs GET /login and returns (router, csrf cookie pair) so the browser

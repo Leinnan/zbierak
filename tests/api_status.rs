@@ -1,84 +1,13 @@
-use std::{path::PathBuf, sync::Arc};
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(missing_docs)]
 
-use axum::{
-    Router,
-    body::Body,
-    http::{Request, StatusCode},
-};
-use http_body_util::BodyExt;
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use zbierak::token_hash;
+
+mod common;
+
+use axum::{body::Body, http::StatusCode};
+use common::{ingest_request, response_json, seed_key, seed_project, test_app, test_pool};
 use tower::ServiceExt;
-use zbierak::{AppState, Config, router, token_hash};
-
-async fn test_pool() -> SqlitePool {
-    let db = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    sqlx::migrate!().run(&db).await.unwrap();
-    db
-}
-
-async fn seed_project(db: &SqlitePool, project_id: i64, slug: &str) {
-    sqlx::query(
-        "INSERT OR IGNORE INTO users (id, email, display_name, password_hash)
-         VALUES (1, 'owner@example.com', 'Owner', 'unused')",
-    )
-    .execute(db)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO projects (id, slug, name, created_by) VALUES (?, ?, 'Demo', 1)")
-        .bind(project_id)
-        .bind(slug)
-        .execute(db)
-        .await
-        .unwrap();
-}
-
-async fn seed_key(db: &SqlitePool, project_id: i64, key: &str) {
-    sqlx::query(
-        "INSERT INTO ingest_keys (project_id, name, key_prefix, key_hash, created_by)
-         VALUES (?, 'test', 'zbk_test', ?, 1)",
-    )
-    .bind(project_id)
-    .bind(token_hash(key))
-    .execute(db)
-    .await
-    .unwrap();
-}
-
-fn test_app(db: SqlitePool) -> Router {
-    let state = AppState {
-        config: Arc::new(Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            database_url: "sqlite::memory:".into(),
-            cookie_secure: false,
-            session_days: 30,
-            static_dir: PathBuf::from("src/static"),
-            template_dir: PathBuf::from("src/templates"),
-            webhook_key: None,
-        }),
-        db,
-        templates: Arc::new(tera::Tera::default()),
-        http: reqwest::Client::new(),
-        resolver: std::sync::Arc::new(zbierak::SystemResolver),
-    };
-    router(state)
-}
-
-fn ingest_request(slug: &str, key: Option<&str>, body: impl Into<Body>) -> Request<Body> {
-    let mut builder = Request::post(format!("/api/v1/projects/{slug}/events"))
-        .header("content-type", "application/json");
-    if let Some(key) = key {
-        builder = builder.header("authorization", format!("Bearer {key}"));
-    }
-    builder.body(body.into()).unwrap()
-}
-
-async fn response_json(response: axum::response::Response) -> serde_json::Value {
-    serde_json::from_slice(&response.into_body().collect().await.unwrap().to_bytes()).unwrap()
-}
 
 const VALID_EVENT: &str =
     r#"{"event_id":"evt-1","timestamp":"2026-09-24T12:00:00Z","message":"boom"}"#;
@@ -87,7 +16,12 @@ const VALID_EVENT: &str =
 async fn missing_authorization_is_unauthorized() {
     let app = test_app(test_pool().await);
     let response = app
-        .oneshot(ingest_request("demo", None, Body::from(VALID_EVENT)))
+        .oneshot(ingest_request(
+            "demo",
+            None,
+            Some("application/json"),
+            Body::from(VALID_EVENT),
+        ))
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -104,6 +38,7 @@ async fn unknown_ingest_key_is_unauthorized() {
         .oneshot(ingest_request(
             "demo",
             Some("zbk_wrong"),
+            Some("application/json"),
             Body::from(VALID_EVENT),
         ))
         .await
@@ -122,6 +57,7 @@ async fn key_for_another_project_is_unauthorized() {
         .oneshot(ingest_request(
             "demo",
             Some("zbk_other_project_key"),
+            Some("application/json"),
             Body::from(VALID_EVENT),
         ))
         .await
@@ -144,6 +80,7 @@ async fn revoked_ingest_key_is_unauthorized() {
         .oneshot(ingest_request(
             "demo",
             Some("zbk_revoked_key"),
+            Some("application/json"),
             Body::from(VALID_EVENT),
         ))
         .await
@@ -163,6 +100,7 @@ async fn unknown_project_slug_is_indistinguishable_from_bad_key() {
         .oneshot(ingest_request(
             "missing",
             Some("zbk_test_key"),
+            Some("application/json"),
             Body::from(VALID_EVENT),
         ))
         .await
@@ -183,6 +121,7 @@ async fn oversized_body_is_too_large() {
         .oneshot(ingest_request(
             "demo",
             Some("zbk_test_key"),
+            Some("application/json"),
             Body::from(body),
         ))
         .await
@@ -202,6 +141,7 @@ async fn malformed_json_is_bad_request() {
         .oneshot(ingest_request(
             "demo",
             Some("zbk_test_key"),
+            Some("application/json"),
             Body::from("{not json"),
         ))
         .await
@@ -222,6 +162,7 @@ async fn invalid_timestamp_is_unprocessable() {
         .oneshot(ingest_request(
             "demo",
             Some("zbk_test_key"),
+            Some("application/json"),
             Body::from(event),
         ))
         .await
@@ -243,6 +184,7 @@ async fn conflicting_reuse_of_event_id_is_conflict() {
         .oneshot(ingest_request(
             "demo",
             Some("zbk_test_key"),
+            Some("application/json"),
             Body::from(VALID_EVENT),
         ))
         .await
@@ -255,6 +197,7 @@ async fn conflicting_reuse_of_event_id_is_conflict() {
         .oneshot(ingest_request(
             "demo",
             Some("zbk_test_key"),
+            Some("application/json"),
             Body::from(conflicting),
         ))
         .await
@@ -276,6 +219,7 @@ async fn identical_duplicate_returns_the_first_result() {
         .oneshot(ingest_request(
             "demo",
             Some("zbk_test_key"),
+            Some("application/json"),
             Body::from(VALID_EVENT),
         ))
         .await
@@ -286,6 +230,7 @@ async fn identical_duplicate_returns_the_first_result() {
         .oneshot(ingest_request(
             "demo",
             Some("zbk_test_key"),
+            Some("application/json"),
             Body::from(VALID_EVENT),
         ))
         .await

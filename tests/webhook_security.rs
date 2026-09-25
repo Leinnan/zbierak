@@ -1,29 +1,25 @@
-use std::{net::IpAddr, path::PathBuf, sync::Arc};
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(missing_docs)]
+
+mod common;
+
+use std::{net::IpAddr, sync::Arc};
 
 use axum::{
     Router,
     body::Body,
     http::{Request, StatusCode},
 };
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use common::{LoggedIn, app_with, login as shared_login, test_config, test_pool};
+use sqlx::SqlitePool;
 use tower::ServiceExt;
-use zbierak::{
-    AppState, BoxResolveFuture, Config, Resolver, SystemResolver, decrypt, encrypt, generate_key,
-    hash_password, parse_key, router,
-};
+use zbierak::{Resolver, SystemResolver, decrypt, encrypt, generate_key, hash_password, parse_key};
 
 const EMAIL: &str = "owner@example.com";
 const PASSWORD: &str = "correct-horse-staple-12";
 
 /// Pins every lookup to a single address so tests never touch real DNS.
-struct Pinned(IpAddr);
-
-impl zbierak::Resolver for Pinned {
-    fn resolve(&self, _host: String, _port: u16) -> BoxResolveFuture {
-        let ip = self.0;
-        Box::pin(async move { Ok(vec![ip]) })
-    }
-}
+use common::Pinned;
 
 struct TestApp {
     app: Router,
@@ -34,12 +30,7 @@ async fn seeded_app(
     resolver: Arc<dyn zbierak::Resolver>,
     webhook_key: Option<[u8; 32]>,
 ) -> TestApp {
-    let db = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    sqlx::migrate!().run(&db).await.unwrap();
+    let db = test_pool().await;
     sqlx::query("INSERT INTO users (email, display_name, password_hash) VALUES (?, 'Owner', ?)")
         .bind(EMAIL)
         .bind(hash_password(PASSWORD).unwrap())
@@ -56,71 +47,21 @@ async fn seeded_app(
     .execute(&db)
     .await
     .unwrap();
-    let state = AppState {
-        config: Arc::new(Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            database_url: "sqlite::memory:".into(),
-            cookie_secure: false,
-            session_days: 30,
-            static_dir: PathBuf::from("src/static"),
-            template_dir: PathBuf::from("src/templates"),
-            webhook_key,
-        }),
-        db: db.clone(),
-        templates: Arc::new(tera::Tera::new("src/templates/**/*.html").unwrap()),
-        http: reqwest::Client::new(),
-        resolver,
-    };
+    let mut config = test_config();
+    config.webhook_key = webhook_key;
     TestApp {
-        app: router(state),
+        app: app_with(db.clone(), config, resolver),
         db,
     }
 }
 
 async fn login(app: &Router, db: &SqlitePool) -> (String, String) {
-    let challenge = app
-        .clone()
-        .oneshot(Request::get("/login").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    let set_cookie = challenge
-        .headers()
-        .get("set-cookie")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    let (pair, _) = set_cookie.split_once(';').unwrap();
-    let csrf = pair.split_once('=').unwrap().1;
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/login")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .header("cookie", format!("zbierak_login_csrf={csrf}"))
-                .body(Body::from(format!(
-                    "csrf_token={csrf}&email={EMAIL}&password={PASSWORD}"
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let set_cookie = response
-        .headers()
-        .get("set-cookie")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    let (pair, _) = set_cookie.split_once(';').unwrap();
-    let session = pair.split_once('=').unwrap().1;
-    let session_csrf: String =
-        sqlx::query_scalar("SELECT csrf_token FROM sessions WHERE token_hash=?")
-            .bind(zbierak::token_hash(session))
-            .fetch_one(db)
-            .await
-            .unwrap();
-    (session.to_owned(), session_csrf)
+    let LoggedIn {
+        session_value,
+        csrf,
+        ..
+    } = shared_login(app, db, EMAIL, PASSWORD).await;
+    (session_value, csrf)
 }
 
 fn create_webhook_request(session: &str, csrf: &str, kind: &str, url: &str) -> Request<Body> {

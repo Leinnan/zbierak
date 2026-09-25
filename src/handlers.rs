@@ -3,14 +3,13 @@ use std::path::{Component, Path};
 
 use axum::{
     Json,
-    body::{Body, Bytes},
-    extract::{Form, Path as AxumPath, Query, State},
-    http::{HeaderMap, StatusCode, header},
+    body::Body,
+    extract::{Path as AxumPath, Query, State},
+    http::{StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use sqlx::{FromRow, Row};
 use tera::Context;
 use time::{OffsetDateTime, format_description::well_known::Rfc3339};
@@ -23,6 +22,10 @@ use crate::{
     api_error::ApiError,
     audit,
     auth::{self, User},
+    domain::{IssueStatus, ProjectRole},
+    extractors::{
+        ApiEventBody, ApiJson, ApiPath, ApiPrincipal, ApiQuery, IngestProject, UiForm, UiSession,
+    },
     fingerprint::event_fingerprint,
 };
 
@@ -169,11 +172,8 @@ struct EventView {
     id: String,
     payload_json: String,
     occurred_at: String,
-    occurred_at_iso: String,
     environment: String,
     release: Option<String>,
-    user: Option<String>,
-    context: String,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -279,13 +279,13 @@ pub async fn bootstrap_page(State(state): State<AppState>) -> AppResult<Html<Str
     if users != 0 {
         return Err(AppError::NotFound);
     }
-    render(&state, "bootstrap.html", Context::new())
+    render(&state, "bootstrap.html", &Context::new())
 }
 
 pub async fn bootstrap(
     State(state): State<AppState>,
     cookies: Cookies,
-    Form(form): Form<BootstrapForm>,
+    UiForm(form): UiForm<BootstrapForm>,
 ) -> AppResult<Redirect> {
     validate_identity(&form.email, &form.display_name)?;
     let password_hash = auth::hash_password(&form.password)?;
@@ -331,13 +331,13 @@ pub async fn login_page(
     cookies.add(cookie);
     let mut context = Context::new();
     context.insert("csrf_token", &token);
-    render(&state, "login.html", context)
+    render(&state, "login.html", &context)
 }
 
 pub async fn login(
     State(state): State<AppState>,
     cookies: Cookies,
-    Form(form): Form<LoginForm>,
+    UiForm(form): UiForm<LoginForm>,
 ) -> AppResult<Redirect> {
     let cookie_token = cookies
         .get(auth::LOGIN_CSRF_COOKIE)
@@ -397,17 +397,18 @@ pub async fn login(
 
 pub async fn logout(
     State(state): State<AppState>,
-    cookies: Cookies,
-    Form(form): Form<CsrfForm>,
+    UiSession { session, cookies }: UiSession,
+    UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
     auth::destroy_session(&state, &cookies).await?;
     Ok(Redirect::to("/login"))
 }
 
-pub async fn projects(State(state): State<AppState>, cookies: Cookies) -> AppResult<Html<String>> {
-    let session = auth::require_session(&state, &cookies).await?;
+pub async fn projects(
+    State(state): State<AppState>,
+    UiSession { session, .. }: UiSession,
+) -> AppResult<Html<String>> {
     let projects = sqlx::query_as::<_, ProjectRow>(
         "SELECT p.slug AS id, p.slug, p.name, m.role, p.created_at, p.description, p.status,
                 '/api/v1/projects/' || p.slug || '/events' AS ingest_url FROM projects p
@@ -418,23 +419,21 @@ pub async fn projects(State(state): State<AppState>, cookies: Cookies) -> AppRes
     .await?;
     let mut context = page_context(&session.user, &session.csrf_token);
     context.insert("projects", &projects);
-    render(&state, "projects.html", context)
+    render(&state, "projects.html", &context)
 }
 
 pub async fn create_project(
     State(state): State<AppState>,
-    cookies: Cookies,
-    Form(form): Form<ProjectForm>,
+    UiSession { session, .. }: UiSession,
+    UiForm(form): UiForm<ProjectForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
     let name = required_text("name", &form.name, 100)?;
     let slug = form
         .slug
         .as_deref()
         .filter(|value| !value.trim().is_empty())
-        .map(str::to_owned)
-        .unwrap_or_else(|| slugify(name));
+        .map_or_else(|| slugify(name), str::to_owned);
     validate_slug(&slug)?;
     let description = form.description.as_deref().unwrap_or("").trim();
     if description.chars().count() > 240 {
@@ -463,96 +462,131 @@ pub async fn create_project(
     Ok(Redirect::to(&format!("/projects/{slug}")))
 }
 
-pub async fn project(
-    State(state): State<AppState>,
-    cookies: Cookies,
-    AxumPath(slug): AxumPath<String>,
-    Query(query): Query<ProjectQuery>,
-) -> AppResult<Html<String>> {
-    let session = auth::require_session(&state, &cookies).await?;
-    let project_id = auth::require_project_role(&state, session.user.id, &slug, "viewer").await?;
+/// Everything the project page template renders, loaded once and shared by
+/// the plain project view and the post-key-creation view.
+struct ProjectPageData {
+    project: ProjectRow,
+    issues: Vec<IssueJson>,
+    project_tags: Vec<String>,
+    keys: Vec<KeyRow>,
+    members: Vec<MemberRow>,
+    endpoints: Vec<EndpointRow>,
+}
+
+/// Loads the project page data set. Management collections (keys, members,
+/// endpoints) are only queried for admins, and `filter_tags` is the active
+/// `?tag=` filter (empty when no filtering applies).
+async fn load_project_page(
+    state: &AppState,
+    user_id: i64,
+    project_id: i64,
+    filter_tags: &[String],
+) -> AppResult<ProjectPageData> {
     let project = sqlx::query_as::<_, ProjectRow>(
         "SELECT p.slug AS id, p.slug, p.name, m.role, p.created_at, p.description, p.status,
                 '/api/v1/projects/' || p.slug || '/events' AS ingest_url FROM projects p
          JOIN project_memberships m ON m.project_id=p.id WHERE p.id=? AND m.user_id=?",
     )
     .bind(project_id)
-    .bind(session.user.id)
+    .bind(user_id)
     .fetch_one(&state.db)
     .await?;
-    let filter_tags = filter_tags(query.tag.as_deref())?;
-    let issues = fetch_issues(&state.db, project_id, &filter_tags, None, 100, 0).await?;
+    let can_manage =
+        ProjectRole::parse(&project.role).is_some_and(|role| role >= ProjectRole::Admin);
+    let issues = fetch_issues(&state.db, project_id, filter_tags, None, 100, 0).await?;
     let project_tags = project_tag_list(&state.db, project_id).await?;
-    let can_manage = auth::role_rank(&project.role) >= auth::role_rank("admin");
-    let keys = if can_manage {
-        sqlx::query_as::<_, KeyRow>(
+    let (keys, endpoints, members) = if can_manage {
+        let keys = sqlx::query_as::<_, KeyRow>(
             "SELECT id, name, key_prefix, created_at, last_used_at FROM ingest_keys
              WHERE project_id=? AND revoked_at IS NULL ORDER BY created_at DESC",
         )
         .bind(project_id)
         .fetch_all(&state.db)
-        .await?
-    } else {
-        Vec::new()
-    };
-    let endpoints = if can_manage {
-        sqlx::query_as::<_, EndpointRow>(
+        .await?;
+        let endpoints = sqlx::query_as::<_, EndpointRow>(
             "SELECT n.id, n.name, n.kind, n.url, n.enabled, p.slug AS project_slug
              FROM notification_endpoints n JOIN projects p ON p.id=n.project_id
              WHERE n.project_id=? ORDER BY n.created_at DESC",
         )
         .bind(project_id)
         .fetch_all(&state.db)
-        .await?
-    } else {
-        Vec::new()
-    };
-    let members = if can_manage {
-        sqlx::query_as::<_, MemberRow>(
+        .await?;
+        let members = sqlx::query_as::<_, MemberRow>(
             "SELECT u.id, u.email, u.display_name, m.role FROM project_memberships m
              JOIN users u ON u.id=m.user_id WHERE m.project_id=? ORDER BY u.display_name",
         )
         .bind(project_id)
         .fetch_all(&state.db)
-        .await?
+        .await?;
+        (keys, endpoints, members)
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new(), Vec::new())
     };
+    Ok(ProjectPageData {
+        project,
+        issues,
+        project_tags,
+        keys,
+        members,
+        endpoints,
+    })
+}
+
+/// Builds the project-page context from shared page data plus per-view extras.
+fn project_page_context(
+    session: &auth::Session,
+    page: &ProjectPageData,
+    filter_tags: &[String],
+    new_key: Option<&str>,
+) -> Context {
     let mut context = page_context(&session.user, &session.csrf_token);
-    context.insert("project", &project);
-    context.insert("issues", &issues);
-    context.insert("project_tags", &project_tags);
+    context.insert("project", &page.project);
+    context.insert("issues", &page.issues);
+    context.insert("project_tags", &page.project_tags);
     context.insert("filter_tags", &filter_tags);
-    context.insert("ingest_keys", &keys);
-    context.insert("members", &members);
-    context.insert("notification_endpoints", &endpoints);
-    render(&state, "project.html", context)
+    context.insert("ingest_keys", &page.keys);
+    context.insert("members", &page.members);
+    context.insert("notification_endpoints", &page.endpoints);
+    if let Some(new_key) = new_key {
+        context.insert("ingest_key", new_key);
+    }
+    context
+}
+
+pub async fn project(
+    State(state): State<AppState>,
+    UiSession { session, .. }: UiSession,
+    AxumPath(slug): AxumPath<String>,
+    Query(query): Query<ProjectQuery>,
+) -> AppResult<Html<String>> {
+    let project_id =
+        auth::require_project_role(&state, session.user.id, &slug, ProjectRole::Viewer).await?;
+    let filter_tags = filter_tags(query.tag.as_deref())?;
+    let page = load_project_page(&state, session.user.id, project_id, &filter_tags).await?;
+    let context = project_page_context(&session, &page, &filter_tags, None);
+    render(&state, "project.html", &context)
 }
 
 pub async fn create_member(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath(slug): AxumPath<String>,
-    Form(form): Form<MemberForm>,
+    UiForm(form): UiForm<MemberForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
-    let project_id = auth::require_project_role(&state, session.user.id, &slug, "admin").await?;
-    if !matches!(
-        form.role.as_str(),
-        "owner" | "admin" | "developer" | "viewer"
-    ) {
-        return Err(AppError::BadRequest(
-            "role must be owner, admin, developer, or viewer".into(),
-        ));
-    }
+    let project_id =
+        auth::require_project_role(&state, session.user.id, &slug, ProjectRole::Admin).await?;
+    let role = ProjectRole::parse(&form.role).ok_or_else(|| {
+        AppError::BadRequest("role must be owner, admin, developer, or viewer".into())
+    })?;
     let actor_role: String =
         sqlx::query_scalar("SELECT role FROM project_memberships WHERE project_id=? AND user_id=?")
             .bind(project_id)
             .bind(session.user.id)
             .fetch_one(&state.db)
             .await?;
-    if actor_role != "owner" && auth::role_rank(&form.role) >= auth::role_rank("admin") {
+    let actor = ProjectRole::parse(&actor_role).ok_or(AppError::Forbidden)?;
+    if actor < ProjectRole::Owner && role >= ProjectRole::Admin {
         return Err(AppError::Forbidden);
     }
     validate_identity(&form.email, &form.display_name)?;
@@ -563,20 +597,19 @@ pub async fn create_member(
             .bind(&email)
             .fetch_optional(&mut *tx)
             .await?;
-    let user_id = match existing {
-        Some(id) => id,
-        None => {
-            let password_hash = auth::hash_password(&form.password)?;
-            sqlx::query(
-                "INSERT INTO users (email, display_name, password_hash) VALUES (?, ?, ?) RETURNING id",
-            )
-            .bind(email)
-            .bind(form.display_name.trim())
-            .bind(password_hash)
-            .fetch_one(&mut *tx)
-            .await?
-            .get::<i64, _>(0)
-        }
+    let user_id = if let Some(id) = existing {
+        id
+    } else {
+        let password_hash = auth::hash_password(&form.password)?;
+        sqlx::query(
+            "INSERT INTO users (email, display_name, password_hash) VALUES (?, ?, ?) RETURNING id",
+        )
+        .bind(email)
+        .bind(form.display_name.trim())
+        .bind(password_hash)
+        .fetch_one(&mut *tx)
+        .await?
+        .get::<i64, _>(0)
     };
     let target_role = sqlx::query_scalar::<_, String>(
         "SELECT role FROM project_memberships WHERE project_id=? AND user_id=?",
@@ -585,14 +618,11 @@ pub async fn create_member(
     .bind(user_id)
     .fetch_optional(&mut *tx)
     .await?;
-    if actor_role != "owner"
-        && target_role
-            .as_deref()
-            .is_some_and(|role| auth::role_rank(role) >= auth::role_rank("admin"))
-    {
+    let target = target_role.as_deref().and_then(ProjectRole::parse);
+    if actor < ProjectRole::Owner && target.is_some_and(|existing| existing >= ProjectRole::Admin) {
         return Err(AppError::Forbidden);
     }
-    if user_id == session.user.id && form.role != "owner" {
+    if user_id == session.user.id && role != ProjectRole::Owner {
         return Err(AppError::BadRequest(
             "an owner cannot demote their own membership".into(),
         ));
@@ -603,7 +633,7 @@ pub async fn create_member(
     )
     .bind(project_id)
     .bind(user_id)
-    .bind(form.role)
+    .bind(role.as_str())
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
@@ -612,13 +642,13 @@ pub async fn create_member(
 
 pub async fn create_ingest_key(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath(slug): AxumPath<String>,
-    Form(form): Form<KeyForm>,
+    UiForm(form): UiForm<KeyForm>,
 ) -> AppResult<Html<String>> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
-    let project_id = auth::require_project_role(&state, session.user.id, &slug, "admin").await?;
+    let project_id =
+        auth::require_project_role(&state, session.user.id, &slug, ProjectRole::Admin).await?;
     let name = required_text("name", &form.name, 100)?;
     let key = format!("zbk_{}", auth::random_token(32));
     sqlx::query(
@@ -632,70 +662,32 @@ pub async fn create_ingest_key(
     .bind(session.user.id)
     .execute(&state.db)
     .await?;
-    let project = sqlx::query_as::<_, ProjectRow>(
-        "SELECT p.slug AS id, p.slug, p.name, m.role, p.created_at, p.description, p.status,
-                '/api/v1/projects/' || p.slug || '/events' AS ingest_url FROM projects p
-         JOIN project_memberships m ON m.project_id=p.id WHERE p.id=? AND m.user_id=?",
-    )
-    .bind(project_id)
-    .bind(session.user.id)
-    .fetch_one(&state.db)
-    .await?;
-    let issues = fetch_issues(&state.db, project_id, &[], None, 100, 0).await?;
-    let keys = sqlx::query_as::<_, KeyRow>(
-        "SELECT id, name, key_prefix, created_at, last_used_at FROM ingest_keys
-         WHERE project_id=? AND revoked_at IS NULL ORDER BY created_at DESC",
-    )
-    .bind(project_id)
-    .fetch_all(&state.db)
-    .await?;
-    let members = sqlx::query_as::<_, MemberRow>(
-        "SELECT u.id, u.email, u.display_name, m.role FROM project_memberships m
-         JOIN users u ON u.id=m.user_id WHERE m.project_id=? ORDER BY u.display_name",
-    )
-    .bind(project_id)
-    .fetch_all(&state.db)
-    .await?;
-    let endpoints = sqlx::query_as::<_, EndpointRow>(
-        "SELECT n.id, n.name, n.kind, n.url, n.enabled, p.slug AS project_slug
-         FROM notification_endpoints n JOIN projects p ON p.id=n.project_id
-         WHERE n.project_id=? ORDER BY n.created_at DESC",
-    )
-    .bind(project_id)
-    .fetch_all(&state.db)
-    .await?;
-    let mut context = page_context(&session.user, &session.csrf_token);
-    context.insert("project", &project);
-    context.insert("ingest_key", &key);
-    context.insert("issues", &issues);
-    context.insert("project_tags", &Vec::<String>::new());
-    context.insert("filter_tags", &Vec::<String>::new());
-    context.insert("ingest_keys", &keys);
-    context.insert("members", &members);
-    context.insert("notification_endpoints", &endpoints);
-    render(&state, "project.html", context)
+    let page = load_project_page(&state, session.user.id, project_id, &[]).await?;
+    let context = project_page_context(&session, &page, &[], Some(&key));
+    render(&state, "project.html", &context)
 }
 
 pub async fn revoke_ingest_key(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath((slug, key_id)): AxumPath<(String, i64)>,
-    Form(form): Form<CsrfForm>,
+    UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
-    let project_id = auth::require_project_role(&state, session.user.id, &slug, "admin").await?;
+    let project_id =
+        auth::require_project_role(&state, session.user.id, &slug, ProjectRole::Admin).await?;
+    let mut tx = state.db.begin().await?;
     let result =
         sqlx::query("UPDATE ingest_keys SET revoked_at=unixepoch() WHERE id=? AND project_id=? AND revoked_at IS NULL")
             .bind(key_id)
             .bind(project_id)
-            .execute(&state.db)
+            .execute(&mut *tx)
             .await?;
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
     audit::record(
-        &state.db,
+        &mut *tx,
         Some(session.user.id),
         "ingest_key.revoked",
         Some("ingest_key"),
@@ -703,6 +695,7 @@ pub async fn revoke_ingest_key(
         json!({ "project": slug }),
     )
     .await?;
+    tx.commit().await?;
     Ok(Redirect::to(&format!("/projects/{slug}")))
 }
 
@@ -720,7 +713,7 @@ async fn load_issue_details(
     slug: &str,
     issue_id: i64,
 ) -> AppResult<IssueDetails> {
-    let project_id = auth::require_project_role(state, user_id, slug, "viewer").await?;
+    let project_id = auth::require_project_role(state, user_id, slug, ProjectRole::Viewer).await?;
     let project = sqlx::query_as::<_, ProjectRow>(
         "SELECT p.slug AS id, p.slug, p.name, m.role, p.created_at, p.description, p.status,
                 '/api/v1/projects/' || p.slug || '/events' AS ingest_url FROM projects p
@@ -746,7 +739,15 @@ async fn load_issue_details(
     .bind(issue_id)
     .fetch_all(&state.db)
     .await?;
-    let event_views: Vec<EventView> = events.into_iter().map(event_view).collect();
+    let payloads: Vec<Value> = events
+        .iter()
+        .map(|row| serde_json::from_str::<Value>(&row.payload_json).unwrap_or(Value::Null))
+        .collect();
+    let event_views: Vec<EventView> = events
+        .into_iter()
+        .zip(payloads.iter())
+        .map(|(row, payload)| event_view(row, payload))
+        .collect();
     let comments = sqlx::query_as::<_, CommentRow>(
         "SELECT c.id, c.body, u.display_name, c.created_at FROM issue_comments c
          JOIN users u ON u.id=c.user_id WHERE c.issue_id=? ORDER BY c.created_at",
@@ -770,8 +771,7 @@ async fn load_issue_details(
             json!(tags_for_issue(&state.db, issue_id).await?),
         );
     }
-    if let Some(latest) = event_views.first()
-        && let Ok(payload) = serde_json::from_str::<Value>(&latest.payload_json)
+    if let Some(payload) = payloads.first()
         && let Some(object) = issue_value.as_object_mut()
     {
         object.insert(
@@ -793,7 +793,7 @@ async fn load_issue_details(
             "release".into(),
             payload.get("release").cloned().unwrap_or(Value::Null),
         );
-        object.insert("stacktrace".into(), json!(format_stacktrace(&payload)));
+        object.insert("stacktrace".into(), json!(format_stacktrace(payload)));
     }
     Ok(IssueDetails {
         project,
@@ -866,7 +866,7 @@ async fn fetch_issues(
             separated.push_bind(tag);
         }
         separated.push_unseparated(")) = ");
-        builder.push_bind(tags.len() as i64);
+        builder.push_bind(i64::try_from(tags.len()).unwrap_or(i64::MAX));
     }
     builder
         .push(" ORDER BY i.last_seen_at DESC LIMIT ")
@@ -902,6 +902,10 @@ async fn fetch_issues(
 }
 
 /// Replaces the tag set of one issue and records the change as activity.
+///
+/// Tags are compared as a set (`previous` is read sorted), so resubmitting
+/// the same tags in a different order performs no writes and records no
+/// activity. Actual changes are applied with a single bulk insert.
 async fn replace_issue_tags(
     db: &sqlx::SqlitePool,
     project_id: i64,
@@ -917,31 +921,34 @@ async fn replace_issue_tags(
         .await?
         .ok_or(AppError::NotFound)?;
     let previous = tags_for_issue(&mut *tx, issue_id).await?;
+    let mut canonical = tags.clone();
+    canonical.sort();
+    if canonical == previous {
+        // Return the stored (sorted) set so API responses match list output.
+        return Ok(previous);
+    }
     sqlx::query("DELETE FROM issue_tags WHERE issue_id=?")
         .bind(issue_id)
         .execute(&mut *tx)
         .await?;
-    for tag in &tags {
-        sqlx::query(
-            "INSERT INTO issue_tags (issue_id, tag) VALUES (?, ?)
-             ON CONFLICT(issue_id, tag) DO NOTHING",
-        )
-        .bind(issue_id)
-        .bind(tag)
-        .execute(&mut *tx)
-        .await?;
+    if !tags.is_empty() {
+        let mut builder =
+            sqlx::QueryBuilder::<sqlx::Sqlite>::new("INSERT INTO issue_tags (issue_id, tag) ");
+        builder.push_values(tags.iter(), |mut insert, tag| {
+            insert.push_bind(issue_id).push_bind(tag);
+        });
+        builder.push(" ON CONFLICT(issue_id, tag) DO NOTHING");
+        builder.build().execute(&mut *tx).await?;
     }
-    if previous != tags {
-        sqlx::query(
-            "INSERT INTO issue_activity (issue_id, user_id, kind, details_json)
-             VALUES (?, ?, 'tags', ?)",
-        )
-        .bind(issue_id)
-        .bind(user_id)
-        .bind(json!({ "from": previous, "to": tags }).to_string())
-        .execute(&mut *tx)
-        .await?;
-    }
+    sqlx::query(
+        "INSERT INTO issue_activity (issue_id, user_id, kind, details_json)
+         VALUES (?, ?, 'tags', ?)",
+    )
+    .bind(issue_id)
+    .bind(user_id)
+    .bind(json!({ "from": previous, "to": canonical }).to_string())
+    .execute(&mut *tx)
+    .await?;
     tx.commit().await?;
     // Return the stored (sorted) set so API responses match list output.
     tags_for_issue(db, issue_id).await
@@ -949,10 +956,9 @@ async fn replace_issue_tags(
 
 pub async fn issue(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
 ) -> AppResult<Html<String>> {
-    let session = auth::require_session(&state, &cookies).await?;
     let details = load_issue_details(&state, session.user.id, &slug, issue_id).await?;
     let mut context = page_context(&session.user, &session.csrf_token);
     context.insert("slug", &slug);
@@ -961,15 +967,14 @@ pub async fn issue(
     context.insert("events", &details.events);
     context.insert("comments", &details.comments);
     context.insert("activity", &details.activity);
-    render(&state, "issue.html", context)
+    render(&state, "issue.html", &context)
 }
 
 pub async fn export_issue_markdown(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
 ) -> AppResult<Response> {
-    let session = auth::require_session(&state, &cookies).await?;
     let details = load_issue_details(&state, session.user.id, &slug, issue_id).await?;
     let markdown = issue_markdown(&details);
     Ok((
@@ -981,62 +986,60 @@ pub async fn export_issue_markdown(
 
 pub async fn change_issue_status(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
-    Form(form): Form<StatusForm>,
+    UiForm(form): UiForm<StatusForm>,
 ) -> AppResult<Redirect> {
-    set_issue_status(state, cookies, slug, issue_id, form.csrf_token, form.status).await
+    let status = IssueStatus::parse(&form.status)
+        .ok_or(AppError::BadRequest("invalid issue status".into()))?;
+    set_issue_status(state, session, slug, issue_id, form.csrf_token, status).await
 }
 
 pub async fn resolve_issue(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
-    Form(form): Form<CsrfForm>,
+    UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Redirect> {
     set_issue_status(
         state,
-        cookies,
+        session,
         slug,
         issue_id,
         form.csrf_token,
-        "resolved".into(),
+        IssueStatus::Resolved,
     )
     .await
 }
 
 pub async fn reopen_issue(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
-    Form(form): Form<CsrfForm>,
+    UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Redirect> {
     set_issue_status(
         state,
-        cookies,
+        session,
         slug,
         issue_id,
         form.csrf_token,
-        "unresolved".into(),
+        IssueStatus::Unresolved,
     )
     .await
 }
 
 async fn set_issue_status(
     state: AppState,
-    cookies: Cookies,
+    session: auth::Session,
     slug: String,
     issue_id: i64,
     csrf_token: String,
-    status: String,
+    status: IssueStatus,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &csrf_token)?;
     let project_id =
-        auth::require_project_role(&state, session.user.id, &slug, "developer").await?;
-    if !["unresolved", "resolved", "ignored"].contains(&status.as_str()) {
-        return Err(AppError::BadRequest("invalid issue status".into()));
-    }
+        auth::require_project_role(&state, session.user.id, &slug, ProjectRole::Developer).await?;
     let mut tx = state.db.begin().await?;
     let old_status =
         sqlx::query_scalar::<_, String>("SELECT status FROM issues WHERE id=? AND project_id=?")
@@ -1045,9 +1048,9 @@ async fn set_issue_status(
             .fetch_optional(&mut *tx)
             .await?
             .ok_or(AppError::NotFound)?;
-    if old_status != status {
+    if old_status != status.as_str() {
         sqlx::query("UPDATE issues SET status=? WHERE id=? AND project_id=?")
-            .bind(&status)
+            .bind(status.as_str())
             .bind(issue_id)
             .bind(project_id)
             .execute(&mut *tx)
@@ -1058,7 +1061,7 @@ async fn set_issue_status(
         )
         .bind(issue_id)
         .bind(session.user.id)
-        .bind(json!({ "from": old_status, "to": status }).to_string())
+        .bind(json!({ "from": old_status, "to": status.as_str() }).to_string())
         .execute(&mut *tx)
         .await?;
     }
@@ -1068,14 +1071,13 @@ async fn set_issue_status(
 
 pub async fn add_comment(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
-    Form(form): Form<CommentForm>,
+    UiForm(form): UiForm<CommentForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
     let project_id =
-        auth::require_project_role(&state, session.user.id, &slug, "developer").await?;
+        auth::require_project_role(&state, session.user.id, &slug, ProjectRole::Developer).await?;
     let body = required_text("comment", &form.body, 10_000)?;
     let mut tx = state.db.begin().await?;
     let result = sqlx::query(
@@ -1106,14 +1108,13 @@ pub async fn add_comment(
 
 pub async fn update_issue_tags_form(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
-    Form(form): Form<TagsForm>,
+    UiForm(form): UiForm<TagsForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
     let project_id =
-        auth::require_project_role(&state, session.user.id, &slug, "developer").await?;
+        auth::require_project_role(&state, session.user.id, &slug, ProjectRole::Developer).await?;
     let tags = crate::tags::normalize_comma_separated(&form.tags).map_err(AppError::BadRequest)?;
     replace_issue_tags(&state.db, project_id, issue_id, Some(session.user.id), tags).await?;
     Ok(Redirect::to(&format!("/projects/{slug}/issues/{issue_id}")))
@@ -1165,24 +1166,26 @@ async fn settings_context(
     Ok(context)
 }
 
-pub async fn settings(State(state): State<AppState>, cookies: Cookies) -> AppResult<Html<String>> {
-    let session = auth::require_session(&state, &cookies).await?;
+pub async fn settings(
+    State(state): State<AppState>,
+    UiSession { session, cookies }: UiSession,
+) -> AppResult<Html<String>> {
     let current_hash = cookies
         .get(auth::SESSION_COOKIE)
         .map(|cookie| auth::token_hash(cookie.value()));
     let context = settings_context(&state, &session, current_hash).await?;
-    render(&state, "settings.html", context)
+    render(&state, "settings.html", &context)
 }
 
 pub async fn create_api_token(
     State(state): State<AppState>,
-    cookies: Cookies,
-    Form(form): Form<TokenForm>,
+    UiSession { session, cookies }: UiSession,
+    UiForm(form): UiForm<TokenForm>,
 ) -> AppResult<Html<String>> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
     let name = required_text("name", &form.name, 100)?;
     let token = format!("{}{}", auth::API_TOKEN_PREFIX, auth::random_token(32));
+    let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO api_tokens (user_id, name, token_prefix, token_hash) VALUES (?, ?, ?, ?)",
     )
@@ -1190,10 +1193,10 @@ pub async fn create_api_token(
     .bind(name)
     .bind(&token[..auth::API_TOKEN_PREFIX.len() + 6])
     .bind(auth::token_hash(&token))
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
     audit::record(
-        &state.db,
+        &mut *tx,
         Some(session.user.id),
         "api_token.created",
         Some("api_token"),
@@ -1201,31 +1204,32 @@ pub async fn create_api_token(
         json!({}),
     )
     .await?;
+    tx.commit().await?;
     let current_hash = cookies
         .get(auth::SESSION_COOKIE)
         .map(|cookie| auth::token_hash(cookie.value()));
     let mut context = settings_context(&state, &session, current_hash).await?;
     context.insert("new_api_token", &token);
-    render(&state, "settings.html", context)
+    render(&state, "settings.html", &context)
 }
 
 pub async fn revoke_api_token(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath(token_id): AxumPath<i64>,
-    Form(form): Form<CsrfForm>,
+    UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
+    let mut tx = state.db.begin().await?;
     sqlx::query(
         "UPDATE api_tokens SET revoked_at=unixepoch() WHERE id=? AND user_id=? AND revoked_at IS NULL",
     )
     .bind(token_id)
     .bind(session.user.id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
     audit::record(
-        &state.db,
+        &mut *tx,
         Some(session.user.id),
         "api_token.revoked",
         Some("api_token"),
@@ -1233,15 +1237,15 @@ pub async fn revoke_api_token(
         json!({}),
     )
     .await?;
+    tx.commit().await?;
     Ok(Redirect::to("/settings"))
 }
 
 pub async fn change_password(
     State(state): State<AppState>,
-    cookies: Cookies,
-    Form(form): Form<PasswordForm>,
+    UiSession { session, cookies }: UiSession,
+    UiForm(form): UiForm<PasswordForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
     let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id=?")
         .bind(session.user.id)
@@ -1268,9 +1272,8 @@ pub async fn change_password(
         .bind(current)
         .execute(&mut *tx)
         .await?;
-    tx.commit().await?;
     audit::record(
-        &state.db,
+        &mut *tx,
         Some(session.user.id),
         "user.password_changed",
         Some("user"),
@@ -1278,27 +1281,28 @@ pub async fn change_password(
         json!({ "email": session.user.email }),
     )
     .await?;
+    tx.commit().await?;
     Ok(Redirect::to("/settings"))
 }
 
 pub async fn revoke_other_sessions(
     State(state): State<AppState>,
-    cookies: Cookies,
-    Form(form): Form<CsrfForm>,
+    UiSession { session, cookies }: UiSession,
+    UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
     let current = cookies
         .get(auth::SESSION_COOKIE)
         .map(|cookie| auth::token_hash(cookie.value()))
         .unwrap_or_default();
+    let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM sessions WHERE user_id=? AND token_hash != ?")
         .bind(session.user.id)
         .bind(current)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     audit::record(
-        &state.db,
+        &mut *tx,
         Some(session.user.id),
         "user.sessions_revoked_others",
         Some("user"),
@@ -1306,24 +1310,25 @@ pub async fn revoke_other_sessions(
         json!({}),
     )
     .await?;
+    tx.commit().await?;
     Ok(Redirect::to("/settings"))
 }
 
 pub async fn revoke_session(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath(session_id): AxumPath<i64>,
-    Form(form): Form<CsrfForm>,
+    UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
+    let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM sessions WHERE id=? AND user_id=?")
         .bind(session_id)
         .bind(session.user.id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     audit::record(
-        &state.db,
+        &mut *tx,
         Some(session.user.id),
         "user.session_revoked",
         Some("session"),
@@ -1331,18 +1336,19 @@ pub async fn revoke_session(
         json!({}),
     )
     .await?;
+    tx.commit().await?;
     Ok(Redirect::to("/settings"))
 }
 
 pub async fn create_webhook(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath(slug): AxumPath<String>,
-    Form(form): Form<WebhookForm>,
+    UiForm(form): UiForm<WebhookForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
-    let project_id = auth::require_project_role(&state, session.user.id, &slug, "admin").await?;
+    let project_id =
+        auth::require_project_role(&state, session.user.id, &slug, ProjectRole::Admin).await?;
     let name = required_text("name", &form.name, 100)?;
     let url =
         Url::parse(&form.url).map_err(|_| AppError::BadRequest("invalid webhook URL".into()))?;
@@ -1372,7 +1378,7 @@ pub async fn create_webhook(
     .map_err(|error| AppError::BadRequest(format!("webhook destination rejected: {error}")))?;
     let (secret, secret_encrypted) = if form.kind == "webhook" {
         let secret = required_text("webhook secret", form.secret.as_deref().unwrap_or(""), 1024)?;
-        if secret.len() < 16 {
+        if secret.chars().count() < 16 {
             return Err(AppError::BadRequest(
                 "webhook secret must contain at least 16 characters".into(),
             ));
@@ -1386,6 +1392,7 @@ pub async fn create_webhook(
     } else {
         (None, 0)
     };
+    let mut tx = state.db.begin().await?;
     sqlx::query(
         "INSERT INTO notification_endpoints (project_id, name, kind, url, secret, secret_encrypted, created_by)
          VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -1397,10 +1404,10 @@ pub async fn create_webhook(
     .bind(secret)
     .bind(secret_encrypted)
     .bind(session.user.id)
-    .execute(&state.db)
+    .execute(&mut *tx)
     .await?;
     audit::record(
-        &state.db,
+        &mut *tx,
         Some(session.user.id),
         "webhook.created",
         Some("notification_endpoint"),
@@ -1408,28 +1415,30 @@ pub async fn create_webhook(
         json!({ "project": slug, "kind": form.kind }),
     )
     .await?;
+    tx.commit().await?;
     Ok(Redirect::to("/settings"))
 }
 
 pub async fn delete_webhook(
     State(state): State<AppState>,
-    cookies: Cookies,
+    UiSession { session, .. }: UiSession,
     AxumPath((slug, webhook_id)): AxumPath<(String, i64)>,
-    Form(form): Form<CsrfForm>,
+    UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Redirect> {
-    let session = auth::require_session(&state, &cookies).await?;
     auth::check_csrf(&session, &form.csrf_token)?;
-    let project_id = auth::require_project_role(&state, session.user.id, &slug, "admin").await?;
+    let project_id =
+        auth::require_project_role(&state, session.user.id, &slug, ProjectRole::Admin).await?;
+    let mut tx = state.db.begin().await?;
     let result = sqlx::query("DELETE FROM notification_endpoints WHERE id=? AND project_id=?")
         .bind(webhook_id)
         .bind(project_id)
-        .execute(&state.db)
+        .execute(&mut *tx)
         .await?;
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
     audit::record(
-        &state.db,
+        &mut *tx,
         Some(session.user.id),
         "webhook.deleted",
         Some("notification_endpoint"),
@@ -1437,16 +1446,8 @@ pub async fn delete_webhook(
         json!({ "project": slug }),
     )
     .await?;
+    tx.commit().await?;
     Ok(Redirect::to("/settings"))
-}
-
-#[cfg_attr(feature = "docs", derive(utoipa::ToSchema))]
-#[derive(Serialize)]
-pub struct IngestResponse {
-    id: String,
-    issue_id: i64,
-    fingerprint: String,
-    duplicate: bool,
 }
 
 #[cfg_attr(feature = "docs", utoipa::path(
@@ -1458,7 +1459,7 @@ pub struct IngestResponse {
     request_body = zbierak_protocol::Event,
     security(("bearer_auth" = [])),
     responses(
-        (status = 202, description = "Event accepted, or an idempotent duplicate", body = IngestResponse),
+        (status = 202, description = "Event accepted, or an idempotent duplicate", body = zbierak_protocol::IngestResponse),
         (status = 400, description = "Malformed request body", body = ApiErrorResponse),
         (status = 401, description = "Missing or invalid ingest key", body = ApiErrorResponse),
         (status = 409, description = "Event ID reused with different content", body = ApiErrorResponse),
@@ -1466,47 +1467,37 @@ pub struct IngestResponse {
         (status = 422, description = "Event failed protocol validation", body = ApiErrorResponse),
     )
 ))]
+// The ingestion transaction is intentionally one sequential block; splitting
+// it would scatter the idempotency invariants across helpers.
+#[allow(clippy::too_many_lines)]
 pub async fn ingest(
     State(state): State<AppState>,
-    AxumPath(slug): AxumPath<String>,
-    headers: HeaderMap,
-    body: Bytes,
+    IngestProject {
+        key_id,
+        project_id,
+        slug,
+    }: IngestProject,
+    ApiEventBody { bytes: body }: ApiEventBody,
 ) -> Result<impl IntoResponse, ApiError> {
-    if body.len() > 1_048_576 {
-        return Err(AppError::PayloadTooLarge("event exceeds 1 MiB".into()).into());
-    }
-    let bearer = auth::bearer(&headers)?;
-    let key_hash = auth::token_hash(bearer);
-    let key = sqlx::query_as::<_, (i64, i64)>(
-        "SELECT k.id, k.project_id FROM ingest_keys k JOIN projects p ON p.id=k.project_id
-         WHERE p.slug=? AND k.key_hash=? AND k.revoked_at IS NULL",
-    )
-    .bind(&slug)
-    .bind(&key_hash)
-    .fetch_optional(&state.db)
-    .await?;
-    let Some((key_id, project_id)) = key else {
-        return Err(AppError::Unauthorized.into());
-    };
-    let event: zbierak_protocol::Event = serde_json::from_slice(&body)
+    // The raw body is parsed once; the typed event borrows from the parsed
+    // value and the same value drives fingerprinting, which must keep seeing
+    // extension fields the typed struct drops.
+    let value: Value = serde_json::from_slice(&body)
+        .map_err(|error| AppError::BadRequest(format!("invalid JSON: {error}")))?;
+    let event: zbierak_protocol::Event = zbierak_protocol::Event::deserialize(&value)
         .map_err(|error| AppError::BadRequest(format!("invalid event: {error}")))?;
     event.validate().map_err(|error| AppError::Unprocessable {
         field: Some(error.field().to_owned()),
         message: error.message().to_owned(),
     })?;
-    let value: Value = serde_json::from_slice(&body)
-        .map_err(|error| AppError::BadRequest(format!("invalid JSON: {error}")))?;
     let fingerprint = event_fingerprint(&value);
     let title: String = event.message.chars().take(200).collect();
     let event_labels = crate::tags::labels_from_event_tags(&event.tags);
-    let producer_event_id = event.event_id;
+    let producer_event_id = event.event_id.clone();
     let storage_id = Uuid::new_v4().to_string();
-    let payload = String::from_utf8(body.to_vec())
+    let payload = std::str::from_utf8(&body)
         .map_err(|_| AppError::BadRequest("event body must be UTF-8 JSON".into()))?;
-    let body_hash = Sha256::digest(body.as_ref())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
+    let body_hash = auth::sha256_hex(&body);
     let mut tx = state.db.begin().await?;
     let inserted = sqlx::query(
         "INSERT INTO raw_events (id, project_id, ingest_key_id, body, producer_event_id, body_hash)
@@ -1538,10 +1529,7 @@ pub async fn ingest(
             .as_deref()
             .is_some_and(|stored| stored != body_hash)
         {
-            return Err(AppError::Conflict(format!(
-                "event_id {producer_event_id} was already ingested with different content"
-            ))
-            .into());
+            return Err(AppError::EventConflict(producer_event_id).into());
         }
         sqlx::query("UPDATE ingest_keys SET last_used_at=unixepoch() WHERE id=?")
             .bind(key_id)
@@ -1550,7 +1538,7 @@ pub async fn ingest(
         tx.commit().await?;
         return Ok((
             StatusCode::ACCEPTED,
-            Json(IngestResponse {
+            Json(zbierak_protocol::IngestResponse {
                 id: producer_event_id,
                 issue_id,
                 fingerprint: existing_fingerprint,
@@ -1566,41 +1554,38 @@ pub async fn ingest(
     .bind(&fingerprint)
     .fetch_optional(&mut *tx)
     .await?;
-    let (issue_id, notification_kind) = match existing_issue {
-        Some((issue_id, status)) => {
-            let regression = status == "resolved";
+    let (issue_id, notification_kind) = if let Some((issue_id, status)) = existing_issue {
+        let regression = status == "resolved";
+        sqlx::query(
+            "UPDATE issues SET event_count=event_count+1, last_seen_at=unixepoch(),
+             status=CASE WHEN status='resolved' THEN 'unresolved' ELSE status END
+             WHERE id=?",
+        )
+        .bind(issue_id)
+        .execute(&mut *tx)
+        .await?;
+        if regression {
             sqlx::query(
-                "UPDATE issues SET event_count=event_count+1, last_seen_at=unixepoch(),
-                 status=CASE WHEN status='resolved' THEN 'unresolved' ELSE status END
-                 WHERE id=?",
+                "INSERT INTO issue_activity (issue_id, kind, details_json)
+                 VALUES (?, 'regression', ?)",
             )
             .bind(issue_id)
+            .bind(json!({ "event_id": &producer_event_id }).to_string())
             .execute(&mut *tx)
             .await?;
-            if regression {
-                sqlx::query(
-                    "INSERT INTO issue_activity (issue_id, kind, details_json)
-                     VALUES (?, 'regression', ?)",
-                )
-                .bind(issue_id)
-                .bind(json!({ "event_id": &producer_event_id }).to_string())
-                .execute(&mut *tx)
-                .await?;
-            }
-            (issue_id, regression.then_some("issue.regressed"))
         }
-        None => {
-            let issue_id = sqlx::query(
-                "INSERT INTO issues (project_id, fingerprint, title) VALUES (?, ?, ?) RETURNING id",
-            )
-            .bind(project_id)
-            .bind(&fingerprint)
-            .bind(&title)
-            .fetch_one(&mut *tx)
-            .await?
-            .get::<i64, _>(0);
-            (issue_id, Some("issue.created"))
-        }
+        (issue_id, regression.then_some("issue.regressed"))
+    } else {
+        let issue_id = sqlx::query(
+            "INSERT INTO issues (project_id, fingerprint, title) VALUES (?, ?, ?) RETURNING id",
+        )
+        .bind(project_id)
+        .bind(&fingerprint)
+        .bind(&title)
+        .fetch_one(&mut *tx)
+        .await?
+        .get::<i64, _>(0);
+        (issue_id, Some("issue.created"))
     };
     // Event tags become flat issue labels. The first event seeds the set and
     // later occurrences only add new labels; removing tags is a manual act.
@@ -1609,7 +1594,8 @@ pub async fn ingest(
             .bind(issue_id)
             .fetch_one(&mut *tx)
             .await?;
-        let mut room = crate::tags::MAX_TAGS as i64 - stored;
+        let max_tags = i64::try_from(crate::tags::MAX_TAGS).unwrap_or_default();
+        let mut room = max_tags - stored;
         for label in &event_labels {
             if room <= 0 {
                 break;
@@ -1623,12 +1609,12 @@ pub async fn ingest(
             .execute(&mut *tx)
             .await?
             .rows_affected();
-            room -= inserted as i64;
+            room -= inserted.cast_signed();
         }
     }
     sqlx::query(
         "INSERT INTO events (id, project_id, issue_id, fingerprint, payload_json) VALUES (?, ?, ?, ?, ?)",
-    ).bind(&storage_id).bind(project_id).bind(issue_id).bind(&fingerprint).bind(&payload)
+    ).bind(&storage_id).bind(project_id).bind(issue_id).bind(&fingerprint).bind(payload)
         .execute(&mut *tx).await?;
     sqlx::query("UPDATE ingest_keys SET last_used_at=unixepoch() WHERE id=?")
         .bind(key_id)
@@ -1655,7 +1641,7 @@ pub async fn ingest(
     tx.commit().await?;
     Ok((
         StatusCode::ACCEPTED,
-        Json(IngestResponse {
+        Json(zbierak_protocol::IngestResponse {
             id: producer_event_id,
             issue_id,
             fingerprint,
@@ -1686,21 +1672,24 @@ pub async fn ingest(
 ))]
 pub async fn list_issues(
     State(state): State<AppState>,
-    AxumPath(slug): AxumPath<String>,
-    headers: HeaderMap,
-    Query(query): Query<IssueListQuery>,
+    ApiPath(slug): ApiPath<String>,
+    ApiPrincipal { user_id }: ApiPrincipal,
+    ApiQuery(query): ApiQuery<IssueListQuery>,
 ) -> Result<Json<Vec<IssueJson>>, ApiError> {
-    let user_id = auth::api_token_user(&state, &headers).await?;
-    let project_id = auth::require_project_role(&state, user_id, &slug, "viewer").await?;
     if let Some(status) = query.status.as_deref()
-        && !["unresolved", "resolved", "ignored"].contains(&status)
+        && IssueStatus::parse(status).is_none()
     {
         return Err(
             AppError::BadRequest("status must be unresolved, resolved, or ignored".into()).into(),
         );
     }
+    let limit = query.limit.unwrap_or(50);
+    if !(1..=200).contains(&limit) {
+        return Err(AppError::BadRequest("limit must be between 1 and 200".into()).into());
+    }
     let tags = filter_tags(query.tag.as_deref())?;
-    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let project_id =
+        auth::require_project_role(&state, user_id, &slug, ProjectRole::Viewer).await?;
     let offset = i64::from(query.offset.unwrap_or(0));
     let issues = fetch_issues(
         &state.db,
@@ -1732,11 +1721,11 @@ pub async fn list_issues(
 ))]
 pub async fn get_issue(
     State(state): State<AppState>,
-    AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
-    headers: HeaderMap,
+    ApiPath((slug, issue_id)): ApiPath<(String, i64)>,
+    ApiPrincipal { user_id }: ApiPrincipal,
 ) -> Result<Json<IssueJson>, ApiError> {
-    let user_id = auth::api_token_user(&state, &headers).await?;
-    let project_id = auth::require_project_role(&state, user_id, &slug, "viewer").await?;
+    let project_id =
+        auth::require_project_role(&state, user_id, &slug, ProjectRole::Viewer).await?;
     let mut issue = sqlx::query_as::<_, IssueJson>(
         "SELECT id, title, status, event_count, first_seen_at, last_seen_at, fingerprint
          FROM issues WHERE id=? AND project_id=?",
@@ -1771,12 +1760,12 @@ pub async fn get_issue(
 ))]
 pub async fn update_issue_tags(
     State(state): State<AppState>,
-    AxumPath((slug, issue_id)): AxumPath<(String, i64)>,
-    headers: HeaderMap,
-    Json(payload): Json<UpdateTagsPayload>,
+    ApiPath((slug, issue_id)): ApiPath<(String, i64)>,
+    ApiPrincipal { user_id }: ApiPrincipal,
+    ApiJson(payload): ApiJson<UpdateTagsPayload>,
 ) -> Result<Json<TagsResponse>, ApiError> {
-    let user_id = auth::api_token_user(&state, &headers).await?;
-    let project_id = auth::require_project_role(&state, user_id, &slug, "developer").await?;
+    let project_id =
+        auth::require_project_role(&state, user_id, &slug, ProjectRole::Developer).await?;
     let tags =
         crate::tags::normalize_tags(payload.tags.iter().map(String::as_str)).map_err(|error| {
             AppError::Unprocessable {
@@ -1852,11 +1841,18 @@ pub async fn static_asset(
     } else {
         "public, max-age=3600"
     };
-    Ok(Response::builder()
-        .header(header::CONTENT_TYPE, content_type)
-        .header(header::CACHE_CONTROL, cache_control)
-        .body(Body::from(bytes))
-        .expect("valid static response"))
+    // Constructed without the fallible builder: header values come from the
+    // static tables above, so an encoding failure falls back to defaults
+    // instead of panicking.
+    let mut response = Response::new(Body::from(bytes));
+    let headers = response.headers_mut();
+    if let Ok(value) = header::HeaderValue::from_str(content_type) {
+        headers.insert(header::CONTENT_TYPE, value);
+    }
+    if let Ok(value) = header::HeaderValue::from_str(cache_control) {
+        headers.insert(header::CACHE_CONTROL, value);
+    }
+    Ok(response)
 }
 
 fn page_context(user: &User, csrf: &str) -> Context {
@@ -1869,8 +1865,8 @@ fn page_context(user: &User, csrf: &str) -> Context {
     context
 }
 
-fn render(state: &AppState, template: &str, context: Context) -> AppResult<Html<String>> {
-    Ok(Html(state.templates.render(template, &context)?))
+fn render(state: &AppState, template: &str, context: &Context) -> AppResult<Html<String>> {
+    Ok(Html(state.templates.render(template, context)?))
 }
 
 fn required_text<'a>(field: &str, value: &'a str, maximum: usize) -> AppResult<&'a str> {
@@ -1908,50 +1904,40 @@ fn validate_slug(slug: &str) -> AppResult<()> {
     Ok(())
 }
 
+/// Generates a slug in one bounded pass: lowercase ASCII alphanumerics are
+/// kept, separator runs collapse to single hyphens, and the result never
+/// starts or ends with a hyphen or exceeds [`SLUG_MAX_LEN`] characters.
 fn slugify(value: &str) -> String {
-    value
-        .to_ascii_lowercase()
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .split('-')
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("-")
-        .chars()
-        .take(50)
-        .collect()
+    const SLUG_MAX_LEN: usize = 50;
+    let mut slug = String::with_capacity(SLUG_MAX_LEN);
+    let mut pending_separator = false;
+    for character in value.chars() {
+        if !character.is_ascii_alphanumeric() {
+            pending_separator = true;
+            continue;
+        }
+        if slug.len() + 1 > SLUG_MAX_LEN {
+            break;
+        }
+        if pending_separator && !slug.is_empty() && slug.len() + 2 <= SLUG_MAX_LEN {
+            slug.push('-');
+        }
+        pending_separator = false;
+        slug.push(character.to_ascii_lowercase());
+    }
+    slug
 }
 
-fn event_view(row: EventRow) -> EventView {
-    let payload = serde_json::from_str::<Value>(&row.payload_json).unwrap_or(Value::Null);
+/// Builds the rendered event from an already-parsed payload so each stored
+/// payload is deserialized exactly once per page view.
+fn event_view(row: EventRow, payload: &Value) -> EventView {
     let occurred_at = payload
         .get("timestamp")
         .and_then(Value::as_str)
-        .map(str::to_owned)
-        .unwrap_or_else(|| row.received_at.to_string());
-    let user = payload
-        .get("user")
-        .and_then(Value::as_object)
-        .and_then(|user| {
-            ["email", "username", "id"]
-                .iter()
-                .find_map(|key| user.get(*key).and_then(Value::as_str).map(str::to_owned))
-        });
-    let context = payload
-        .get("contexts")
-        .and_then(|value| serde_json::to_string_pretty(value).ok())
-        .unwrap_or_default();
+        .map_or_else(|| row.received_at.to_string(), str::to_owned);
     EventView {
         id: row.id,
         payload_json: row.payload_json,
-        occurred_at_iso: occurred_at.clone(),
         occurred_at,
         environment: payload
             .get("environment")
@@ -1962,8 +1948,6 @@ fn event_view(row: EventRow) -> EventView {
             .get("release")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        user,
-        context,
     }
 }
 
@@ -1976,26 +1960,29 @@ fn format_stacktrace(payload: &Value) -> String {
     let Some(frames) = frames else {
         return String::new();
     };
-    let mut lines = Vec::with_capacity(frames.len());
-    for frame in frames {
-        let function = frame
-            .get("function")
-            .and_then(Value::as_str)
-            .unwrap_or("<unknown>");
-        let file = frame
-            .get("filename")
-            .and_then(Value::as_str)
-            .unwrap_or("<unknown>");
-        let line = frame.get("line").and_then(Value::as_u64);
-        if let Some(line) = line {
-            lines.push(format!("{function} at {file}:{line}"));
-        } else {
-            lines.push(format!("{function} at {file}"));
-        }
-    }
-    lines.join("\n")
+    frames
+        .iter()
+        .map(|frame| {
+            let function = frame
+                .get("function")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            let file = frame
+                .get("filename")
+                .and_then(Value::as_str)
+                .unwrap_or("<unknown>");
+            match frame.get("line").and_then(Value::as_u64) {
+                Some(line) => format!("{function} at {file}:{line}"),
+                None => format!("{function} at {file}"),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
+// Markdown emission is a single linear sequence of sections; extracting
+// helpers would obscure the document order.
+#[allow(clippy::too_many_lines)]
 fn issue_markdown(details: &IssueDetails) -> String {
     let issue = &details.issue;
     let mut out = String::new();
@@ -2072,7 +2059,7 @@ fn issue_markdown(details: &IssueDetails) -> String {
     if !details.events.is_empty() {
         let _ = writeln!(out, "## Recent events\n");
         for event in &details.events {
-            let mut meta = event.occurred_at_iso.clone();
+            let mut meta = event.occurred_at.clone();
             if !event.environment.is_empty() {
                 meta.push_str(" · ");
                 meta.push_str(&event.environment);
@@ -2158,8 +2145,58 @@ fn format_unix(timestamp: i64) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
     use super::*;
+
+    #[test]
+    fn slugify_collapses_separators_and_respects_bounds() {
+        assert_eq!(slugify("Hello World"), "hello-world");
+        assert_eq!(slugify("--Hello--World--"), "hello-world");
+        assert_eq!(slugify("!!!"), "");
+        assert_eq!(slugify(""), "");
+        assert_eq!(
+            slugify("Ünïcödé"),
+            "n-c-d",
+            "non-ASCII is treated as separators"
+        );
+        let fifty = "a".repeat(50);
+        assert_eq!(slugify("a".repeat(60).as_str()), fifty);
+        let forty_nine = "a".repeat(49);
+        let truncated = format!("{forty_nine}b");
+        assert_eq!(
+            slugify(format!("{forty_nine}-b").as_str()),
+            truncated,
+            "truncation never ends on a separator"
+        );
+        assert_eq!(slugify(format!("-{fifty}").as_str()), fifty);
+    }
+
+    #[test]
+    fn slugified_names_pass_slug_validation() {
+        for name in [
+            "My Fancy Project".to_owned(),
+            "  weird   spacing  ".to_owned(),
+            "dots.dots.dots".to_owned(),
+            "UPPER_lower".to_owned(),
+            format!("{}-b", "a".repeat(49)),
+            format!("{}-{}", "x".repeat(25), "y".repeat(25)),
+        ] {
+            let slug = slugify(&name);
+            assert!(
+                slug.len() >= 2
+                    && slug.len() <= 50
+                    && !slug.starts_with('-')
+                    && !slug.ends_with('-'),
+                "generated slug {slug:?} from {name:?} must satisfy validate_slug"
+            );
+            assert!(
+                super::validate_slug(&slug).is_ok(),
+                "slug {slug:?} failed validation"
+            );
+        }
+    }
 
     fn details(issue: Value, events: Vec<EventView>) -> IssueDetails {
         IssueDetails {
@@ -2214,11 +2251,8 @@ mod tests {
             id: "evt-1".into(),
             payload_json: "{\"message\":\"boom\"}".into(),
             occurred_at: "2026-09-24T12:00:00Z".into(),
-            occurred_at_iso: "2026-09-24T12:00:00Z".into(),
             environment: "production".into(),
             release: Some("1.2.3".into()),
-            user: None,
-            context: String::new(),
         };
         let markdown = issue_markdown(&details(issue_value(), vec![event]));
 

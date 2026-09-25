@@ -10,16 +10,18 @@ fmt-check:
     cargo fmt --all -- --check
 
 check:
-    cargo check --workspace --all-targets
+    cargo check --locked --workspace --all-targets --all-features
 
 test:
-    cargo test --workspace
+    cargo test --locked --workspace --all-features
 
 clippy:
-    cargo clippy --workspace --all-targets -- -D warnings
+    cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
 
+# Real rustdoc check: fails on broken links and (via workspace lints)
+# incomplete public documentation.
 docs-check:
-    cargo clippy --package zbierak --all-targets --features docs -- -D warnings
+    RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 
 run:
     ZBIERAK_LISTEN_ADDR="${ZBIERAK_DEV_LISTEN_ADDR:-127.0.0.1:3000}" ZBIERAK_DATABASE_URL="${ZBIERAK_DEV_DATABASE_URL:-sqlite://data/zbierak.db}" ZBIERAK_STATIC_DIR=src/static ZBIERAK_TEMPLATE_DIR=src/templates cargo run --locked --package zbierak

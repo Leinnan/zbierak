@@ -27,7 +27,7 @@
       <div class="event-list">
         {% for event in events | default(value=[]) %}
         <details class="card event-card" {% if loop.first %}open{% endif %}>
-          <summary><span class="event-dot" aria-hidden="true"></span><span><strong><time class="js-local-time" datetime="{{ event.occurred_at_iso }}">{{ event.occurred_at }}</time></strong><small>{{ event.environment }}{% if event.release %} · {{ event.release }}{% endif %} · <code>{{ event.id }}</code></small></span><span class="event-chevron" aria-hidden="true">+</span></summary>
+          <summary><span class="event-dot" aria-hidden="true"></span><span><strong><time class="js-local-time" datetime="{{ event.occurred_at }}">{{ event.occurred_at }}</time></strong><small>{{ event.environment }}{% if event.release %} · {{ event.release }}{% endif %} · <code>{{ event.id }}</code></small></span><span class="event-chevron" aria-hidden="true">+</span></summary>
           <div class="event-body">
             <div class="payload-heading"><h3>Event payload</h3><button class="btn btn-sm btn-outline-secondary" type="button" data-copy-target="#event-{{ loop.index }}">Copy JSON</button></div>
             <pre class="context-json" tabindex="0"><code id="event-{{ loop.index }}" class="js-json">{{ event.payload_json }}</code></pre>

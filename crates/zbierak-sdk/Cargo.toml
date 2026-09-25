@@ -18,5 +18,5 @@ zbierak-protocol = { path = "../zbierak-protocol" }
 [dev-dependencies]
 tempfile = "3"
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

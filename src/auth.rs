@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use argon2::{
@@ -13,7 +14,7 @@ use sqlx::FromRow;
 use subtle::ConstantTimeEq;
 use tower_cookies::{Cookie, Cookies, cookie::SameSite};
 
-use crate::{AppError, AppResult, AppState};
+use crate::{AppError, AppResult, AppState, domain::ProjectRole};
 
 pub const SESSION_COOKIE: &str = "zbierak_session";
 pub const LOGIN_CSRF_COOKIE: &str = "zbierak_login_csrf";
@@ -24,7 +25,8 @@ fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_secs() as i64
+        .as_secs()
+        .cast_signed()
 }
 
 /// Login throttling is keyed by the SHA-256 of the lowercased email so the raw
@@ -96,8 +98,16 @@ pub struct Session {
     pub csrf_token: String,
 }
 
+/// Hashes a password with Argon2id for storage.
+///
+/// # Errors
+///
+/// Returns [`AppError::BadRequest`] when the password is outside the
+/// 12-1024 character limit, and an internal error when hashing fails.
 pub fn hash_password(password: &str) -> AppResult<String> {
-    if password.len() < 12 || password.len() > 1024 {
+    // Counted in characters to match the error message (and `required_text`).
+    let length = password.chars().count();
+    if !(12..=1024).contains(&length) {
         return Err(AppError::BadRequest(
             "password must contain between 12 and 1024 characters".into(),
         ));
@@ -108,6 +118,9 @@ pub fn hash_password(password: &str) -> AppResult<String> {
         .map_err(|error| AppError::Config(format!("password hashing failed: {error}")))
 }
 
+/// Verifies a password against a stored Argon2 hash. Malformed stored
+/// hashes verify as `false` rather than panicking.
+#[must_use]
 pub fn verify_password(password: &str, encoded: &str) -> bool {
     let Ok(hash) = PasswordHash::new(encoded) else {
         return false;
@@ -123,9 +136,22 @@ pub fn random_token(bytes: usize) -> String {
     URL_SAFE_NO_PAD.encode(value)
 }
 
+/// Lowercase hexadecimal SHA-256 digest of a token, the form stored in the
+/// database; raw tokens are never persisted.
+#[must_use]
 pub fn token_hash(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+    sha256_hex(token.as_bytes())
+}
+
+/// Lowercase hexadecimal SHA-256 digest shared by token hashing and event
+/// body hashing so the encoding stays identical across security surfaces.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut hex = String::with_capacity(2 * digest.len());
+    for byte in digest {
+        let _ = write!(hex, "{byte:02x}");
+    }
+    hex
 }
 
 pub fn secure_eq(left: &str, right: &str) -> bool {
@@ -170,11 +196,7 @@ pub fn check_csrf(session: &Session, supplied: &str) -> AppResult<()> {
 pub async fn create_session(state: &AppState, cookies: &Cookies, user_id: i64) -> AppResult<()> {
     let token = random_token(32);
     let csrf = random_token(24);
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64;
-    let expires_at = now + state.config.session_days * 86_400;
+    let expires_at = now() + state.config.session_days * 86_400;
     sqlx::query(
         "INSERT INTO sessions (token_hash, user_id, csrf_token, expires_at) VALUES (?, ?, ?, ?)",
     )
@@ -209,13 +231,24 @@ pub async fn destroy_session(state: &AppState, cookies: &Cookies) -> AppResult<(
     Ok(())
 }
 
+/// Extracts the credential from an `Authorization: Bearer …` header.
+///
+/// The scheme comparison is case-insensitive per RFC 9110; the credential
+/// itself is preserved exactly.
 pub fn bearer(headers: &HeaderMap) -> AppResult<&str> {
-    headers
+    let value = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.strip_prefix("Bearer "))
-        .filter(|value| !value.is_empty())
-        .ok_or(AppError::Unauthorized)
+        .ok_or(AppError::Unauthorized)?;
+    let (scheme, credential) = value.split_once(' ').ok_or(AppError::Unauthorized)?;
+    if !scheme.eq_ignore_ascii_case("bearer") {
+        return Err(AppError::Unauthorized);
+    }
+    let credential = credential.trim();
+    if credential.is_empty() {
+        return Err(AppError::Unauthorized);
+    }
+    Ok(credential)
 }
 
 /// Prefix identifying a personal API token issued from the settings page.
@@ -244,11 +277,35 @@ pub async fn api_token_user(state: &AppState, headers: &HeaderMap) -> AppResult<
     Ok(user_id)
 }
 
+/// Resolves an `Authorization: Bearer zbk_…` ingest key for one project slug
+/// to `(key_id, project_id)`. Unknown slugs, unknown keys, and revoked keys
+/// all produce the same 401 so project existence is never revealed.
+pub async fn ingest_key_project(
+    state: &AppState,
+    headers: &HeaderMap,
+    slug: &str,
+) -> AppResult<(i64, i64)> {
+    let bearer = bearer(headers)?;
+    let key_hash = token_hash(bearer);
+    sqlx::query_as::<_, (i64, i64)>(
+        "SELECT k.id, k.project_id FROM ingest_keys k JOIN projects p ON p.id=k.project_id
+         WHERE p.slug=? AND k.key_hash=? AND k.revoked_at IS NULL",
+    )
+    .bind(slug)
+    .bind(&key_hash)
+    .fetch_optional(&state.db)
+    .await?
+    .ok_or(AppError::Unauthorized)
+}
+
+/// Requires membership in the project identified by `slug` with at least
+/// `minimum` capability. Unknown roles stored in the database fail closed.
+/// Returns the project id on success.
 pub async fn require_project_role(
     state: &AppState,
     user_id: i64,
     slug: &str,
-    minimum: &str,
+    minimum: ProjectRole,
 ) -> AppResult<i64> {
     let row = sqlx::query_as::<_, (i64, String)>(
         "SELECT p.id, m.role FROM projects p JOIN project_memberships m ON m.project_id = p.id
@@ -259,31 +316,44 @@ pub async fn require_project_role(
     .fetch_optional(&state.db)
     .await?
     .ok_or(AppError::NotFound)?;
-    if role_rank(&row.1) < role_rank(minimum) {
+    let actual = ProjectRole::parse(&row.1).ok_or(AppError::Forbidden)?;
+    if actual < minimum {
         return Err(AppError::Forbidden);
     }
     Ok(row.0)
 }
 
-pub(crate) fn role_rank(role: &str) -> u8 {
-    match role {
-        "owner" => 4,
-        "admin" => 3,
-        "developer" => 2,
-        "viewer" => 1,
-        _ => 0,
-    }
-}
-
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{hash_password, role_rank, secure_eq, token_hash, verify_password};
+
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::{bearer, hash_password, secure_eq, token_hash, verify_password};
+    use crate::domain::ProjectRole;
+
+    fn authorization(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::AUTHORIZATION, HeaderValue::from_str(value).unwrap());
+        headers
+    }
 
     #[test]
     fn password_round_trip() {
         let hash = hash_password("correct horse battery staple").unwrap();
         assert!(verify_password("correct horse battery staple", &hash));
         assert!(!verify_password("incorrect password", &hash));
+    }
+
+    #[test]
+    fn password_length_is_counted_in_characters() {
+        // 12 bytes but only 3 characters: rejected despite sufficient bytes.
+        assert!(hash_password("\u{1F600}\u{1F600}\u{1F600}").is_err());
+        // 4 emoji = 4 characters but 16 bytes: still rejected.
+        assert!(hash_password("\u{1F600}".repeat(4).as_str()).is_err());
+        // 12 characters of emoji: accepted.
+        assert!(hash_password("\u{1F600}".repeat(12).as_str()).is_ok());
+        assert!(hash_password("short").is_err());
     }
 
     #[test]
@@ -295,9 +365,26 @@ mod tests {
 
     #[test]
     fn roles_are_ordered_by_capability() {
-        assert!(role_rank("owner") > role_rank("admin"));
-        assert!(role_rank("admin") > role_rank("developer"));
-        assert!(role_rank("developer") > role_rank("viewer"));
-        assert_eq!(role_rank("unknown"), 0);
+        assert!(ProjectRole::Owner > ProjectRole::Admin);
+        assert!(ProjectRole::Admin > ProjectRole::Developer);
+        assert!(ProjectRole::Developer > ProjectRole::Viewer);
+        assert_eq!(ProjectRole::parse("unknown"), None);
+    }
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive() {
+        for scheme in ["Bearer", "bearer", "BEARER", "bEaReR"] {
+            let headers = authorization(&format!("{scheme} zbk_test_key"));
+            assert_eq!(bearer(&headers).unwrap(), "zbk_test_key");
+        }
+    }
+
+    #[test]
+    fn bearer_rejects_missing_malformed_and_empty_credentials() {
+        assert!(bearer(&HeaderMap::new()).is_err());
+        assert!(bearer(&authorization("zbk_test_key")).is_err());
+        assert!(bearer(&authorization("Basic zbk_test_key")).is_err());
+        assert!(bearer(&authorization("Bearer ")).is_err());
+        assert!(bearer(&authorization("Bearer    ")).is_err());
     }
 }

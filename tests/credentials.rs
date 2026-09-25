@@ -1,14 +1,20 @@
-use std::{path::PathBuf, sync::Arc};
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(missing_docs)]
+
+mod common;
 
 use axum::{
     Router,
     body::Body,
     http::{Request, StatusCode},
 };
+use common::{
+    LoggedIn, app_with_templates_and_config, login as shared_login, test_config, test_pool,
+};
 use http_body_util::BodyExt;
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use sqlx::SqlitePool;
 use tower::ServiceExt;
-use zbierak::{AppState, Config, hash_password, router, token_hash, verify_password};
+use zbierak::{hash_password, token_hash, verify_password};
 
 const EMAIL: &str = "owner@example.com";
 const PASSWORD: &str = "correct-horse-staple-12";
@@ -19,12 +25,7 @@ struct TestApp {
 }
 
 async fn seeded_app() -> TestApp {
-    let db = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    sqlx::migrate!().run(&db).await.unwrap();
+    let db = test_pool().await;
     sqlx::query("INSERT INTO users (email, display_name, password_hash) VALUES (?, 'Owner', ?)")
         .bind(EMAIL)
         .bind(hash_password(PASSWORD).unwrap())
@@ -41,74 +42,19 @@ async fn seeded_app() -> TestApp {
     .execute(&db)
     .await
     .unwrap();
-    let state = AppState {
-        config: Arc::new(Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            database_url: "sqlite::memory:".into(),
-            cookie_secure: false,
-            session_days: 30,
-            static_dir: PathBuf::from("src/static"),
-            template_dir: PathBuf::from("src/templates"),
-            webhook_key: None,
-        }),
-        db: db.clone(),
-        templates: Arc::new(tera::Tera::new("src/templates/**/*.html").unwrap()),
-        http: reqwest::Client::new(),
-        resolver: std::sync::Arc::new(zbierak::SystemResolver),
-    };
-    TestApp {
-        app: router(state),
-        db,
-    }
+    let app = app_with_templates_and_config(db.clone(), test_config());
+    TestApp { app, db }
 }
 
 /// Logs in through the real flow (CSRF pair included) and returns the session
 /// cookie plus the session CSRF token used by authenticated forms.
 async fn login(app: &Router, db: &SqlitePool) -> (String, String) {
-    let challenge = app
-        .clone()
-        .oneshot(Request::get("/login").body(Body::empty()).unwrap())
-        .await
-        .unwrap();
-    let set_cookie = challenge
-        .headers()
-        .get("set-cookie")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    let (name_value, _) = set_cookie.split_once(';').unwrap();
-    let (_, csrf) = name_value.split_once('=').unwrap();
-
-    let response = app
-        .clone()
-        .oneshot(
-            Request::post("/login")
-                .header("content-type", "application/x-www-form-urlencoded")
-                .header("cookie", format!("zbierak_login_csrf={csrf}"))
-                .body(Body::from(format!(
-                    "csrf_token={csrf}&email={EMAIL}&password={PASSWORD}"
-                )))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::SEE_OTHER);
-    let set_cookie = response
-        .headers()
-        .get("set-cookie")
-        .unwrap()
-        .to_str()
-        .unwrap();
-    let (name_value, _) = set_cookie.split_once(';').unwrap();
-    let (name, value) = name_value.split_once('=').unwrap();
-    assert_eq!(name, "zbierak_session");
-    let session_csrf: String =
-        sqlx::query_scalar("SELECT csrf_token FROM sessions WHERE token_hash=?")
-            .bind(token_hash(value))
-            .fetch_one(db)
-            .await
-            .unwrap();
-    (value.to_owned(), session_csrf)
+    let LoggedIn {
+        session_value,
+        csrf,
+        ..
+    } = shared_login(app, db, EMAIL, PASSWORD).await;
+    (session_value, csrf)
 }
 
 fn form(app: &Router, session: &str, csrf: &str, path: &str, extra: &str) -> Request<Body> {

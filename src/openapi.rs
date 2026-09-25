@@ -1,4 +1,4 @@
-//! OpenAPI document and Scalar documentation UI.
+//! `OpenAPI` document and Scalar documentation UI.
 //!
 //! This module is compiled only when the `docs` Cargo feature is enabled, so
 //! release builds and container images do not link `utoipa` or ship the
@@ -21,7 +21,7 @@ use utoipa_scalar::{Scalar, Servable};
 use crate::handlers;
 use zbierak_protocol::{self as protocol, ApiErrorResponse as ApiErrorSchema};
 
-/// OpenAPI document for the versioned HTTP API.
+/// `OpenAPI` document for the versioned HTTP API.
 #[derive(OpenApi)]
 #[openapi(
     info(
@@ -46,8 +46,6 @@ use zbierak_protocol::{self as protocol, ApiErrorResponse as ApiErrorSchema};
         protocol::Breadcrumb,
         protocol::User,
         protocol::IngestResponse,
-        protocol::IngestStatus,
-        handlers::IngestResponse,
         handlers::IssueJson,
         handlers::UpdateTagsPayload,
         handlers::TagsResponse,
@@ -101,7 +99,7 @@ const SCALAR_HTML: &str = r#"<!doctype html>
 </html>
 "#;
 
-/// Builds the documentation router: raw OpenAPI JSON plus the Scalar UI.
+/// Builds the documentation router: raw `OpenAPI` JSON plus the Scalar UI.
 pub fn docs_router() -> Router {
     Router::new()
         .route(
@@ -118,10 +116,14 @@ pub fn docs_router() -> Router {
 }
 
 async fn scalar_bundle() -> Response {
-    Response::builder()
-        .header(header::CONTENT_TYPE, "text/javascript; charset=utf-8")
-        .body(Body::from(SCALAR_JS))
-        .expect("valid scalar bundle response")
+    // Built without the fallible response builder: the header values are
+    // static, so there is no error path to panic on.
+    let mut response = Response::new(Body::from(SCALAR_JS));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/javascript; charset=utf-8"),
+    );
+    response
 }
 
 /// Documentation pages need a relaxed CSP so Scalar's inline bootstrap can run.
@@ -140,7 +142,9 @@ async fn docs_security_headers(request: Request<Body>, next: Next) -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
     use axum::{body::Body, http::Request};
     use http_body_util::BodyExt;
     use tower::ServiceExt;

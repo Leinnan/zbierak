@@ -84,6 +84,12 @@ impl Event {
     }
 
     /// Validates protocol invariants and ingestion limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ValidationError`] naming the first field that violates
+    /// the protocol contract (required fields, sizes, and collection
+    /// bounds).
     pub fn validate(&self) -> Result<(), ValidationError> {
         if self.version != PROTOCOL_VERSION {
             return Err(ValidationError::new(
@@ -268,21 +274,14 @@ pub struct User {
 #[cfg_attr(feature = "schema", derive(ToSchema))]
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct IngestResponse {
-    /// Accepted event identifier.
-    pub event_id: String,
-    /// Whether this was a newly accepted event or an idempotent duplicate.
-    pub status: IngestStatus,
-}
-
-/// Ingestion disposition.
-#[cfg_attr(feature = "schema", derive(ToSchema))]
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum IngestStatus {
-    /// The event was accepted for processing.
-    Accepted,
-    /// The identifier had already been accepted.
-    Duplicate,
+    /// Producer-assigned event identifier, echoed back.
+    pub id: String,
+    /// Issue the event was grouped into.
+    pub issue_id: i64,
+    /// Server-computed grouping fingerprint.
+    pub fingerprint: String,
+    /// True when this event was an idempotent duplicate of a prior event.
+    pub duplicate: bool,
 }
 
 /// Machine-readable API error body.
@@ -314,11 +313,13 @@ impl ValidationError {
     }
 
     /// Returns the invalid field path.
+    #[must_use]
     pub fn field(&self) -> &'static str {
         self.field
     }
 
     /// Returns the validation explanation without its field prefix.
+    #[must_use]
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -357,11 +358,18 @@ fn validate_optional(field: &'static str, value: &str, max: usize) -> Result<(),
     Ok(())
 }
 
-/// Parsed timestamps must be RFC 3339 and land within a sane operational window
-/// (year 2000 through 2100) so clock malfunctions cannot poison stored data.
+/// Parsed timestamps must land within a sane operational window (these
+/// bounds, inclusive) so clock malfunctions cannot poison stored data.
 const MIN_TIMESTAMP_YEAR: i32 = 2000;
 const MAX_TIMESTAMP_YEAR: i32 = 2100;
 
+/// Validates that `value` is an RFC 3339 timestamp within the supported
+/// year window (2000 through 2100).
+///
+/// # Errors
+///
+/// Returns a [`ValidationError`] for `field` when the value does not parse
+/// as RFC 3339 or falls outside the year window.
 pub fn validate_timestamp(field: &'static str, value: &str) -> Result<(), ValidationError> {
     let parsed = OffsetDateTime::parse(value, &Rfc3339).map_err(|_| {
         ValidationError::new(
@@ -380,7 +388,9 @@ pub fn validate_timestamp(field: &'static str, value: &str) -> Result<(), Valida
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
     use super::*;
 
     fn valid_event() -> Event {

@@ -1,93 +1,24 @@
-use std::{path::PathBuf, sync::Arc};
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(missing_docs)]
+
+mod common;
 
 use axum::{
-    Router,
     body::Body,
     http::{Request, StatusCode},
 };
-use http_body_util::BodyExt;
-use sqlx::{SqlitePool, sqlite::SqlitePoolOptions};
+use common::{
+    response_json, seed_key, seed_membership, seed_token, seed_user, test_app, test_pool,
+};
 use tower::ServiceExt;
-use zbierak::{AppState, Config, router, token_hash};
+use zbierak::token_hash;
 
-async fn test_pool() -> SqlitePool {
-    let db = SqlitePoolOptions::new()
-        .max_connections(1)
-        .connect("sqlite::memory:")
-        .await
-        .unwrap();
-    sqlx::migrate!().run(&db).await.unwrap();
-    db
-}
-
-/// Seeds user 1 (owner), user 2 (viewer), and one project.
-async fn seed_project(db: &SqlitePool, project_id: i64, slug: &str) {
-    sqlx::query(
-        "INSERT OR IGNORE INTO users (id, email, display_name, password_hash)
-         VALUES (1, 'owner@example.com', 'Owner', 'unused'),
-                (2, 'viewer@example.com', 'Viewer', 'unused')",
-    )
-    .execute(db)
-    .await
-    .unwrap();
-    sqlx::query("INSERT INTO projects (id, slug, name, created_by) VALUES (?, ?, 'Demo', 1)")
-        .bind(project_id)
-        .bind(slug)
-        .execute(db)
-        .await
-        .unwrap();
-    for (user_id, role) in [(1, "owner"), (2, "viewer")] {
-        sqlx::query("INSERT INTO project_memberships (project_id, user_id, role) VALUES (?, ?, ?)")
-            .bind(project_id)
-            .bind(user_id)
-            .bind(role)
-            .execute(db)
-            .await
-            .unwrap();
-    }
-}
-
-async fn seed_key(db: &SqlitePool, project_id: i64, key: &str) {
-    sqlx::query(
-        "INSERT INTO ingest_keys (project_id, name, key_prefix, key_hash, created_by)
-         VALUES (?, 'test', 'zbk_test', ?, 1)",
-    )
-    .bind(project_id)
-    .bind(token_hash(key))
-    .execute(db)
-    .await
-    .unwrap();
-}
-
-async fn seed_token(db: &SqlitePool, user_id: i64, token: &str) {
-    sqlx::query(
-        "INSERT INTO api_tokens (user_id, name, token_prefix, token_hash)
-         VALUES (?, 'test', 'zpat_test', ?)",
-    )
-    .bind(user_id)
-    .bind(token_hash(token))
-    .execute(db)
-    .await
-    .unwrap();
-}
-
-fn test_app(db: SqlitePool) -> Router {
-    let state = AppState {
-        config: Arc::new(Config {
-            bind: "127.0.0.1:0".parse().unwrap(),
-            database_url: "sqlite::memory:".into(),
-            cookie_secure: false,
-            session_days: 30,
-            static_dir: PathBuf::from("src/static"),
-            template_dir: PathBuf::from("src/templates"),
-            webhook_key: None,
-        }),
-        db,
-        templates: Arc::new(tera::Tera::default()),
-        http: reqwest::Client::new(),
-        resolver: std::sync::Arc::new(zbierak::SystemResolver),
-    };
-    router(state)
+/// Seeds user 1 (owner), user 2 (viewer), and one project with memberships.
+async fn seed_project(db: &sqlx::SqlitePool, project_id: i64, slug: &str) {
+    common::seed_project(db, project_id, slug).await;
+    seed_user(db, 2, "viewer@example.com", "Viewer").await;
+    seed_membership(db, project_id, 1, "owner").await;
+    seed_membership(db, project_id, 2, "viewer").await;
 }
 
 fn ingest_request(slug: &str, body: String) -> Request<Body> {
@@ -99,43 +30,26 @@ fn ingest_request(slug: &str, body: String) -> Request<Body> {
 }
 
 fn event_body(event_id: &str, message: &str, tags: &str) -> String {
+    use std::fmt::Write as _;
     let mut event = format!(
         r#"{{"event_id":"{event_id}","timestamp":"2026-09-24T12:00:00Z","message":"{message}""#
     );
     if !tags.is_empty() {
-        event.push_str(&format!(r#","tags":{tags}"#));
+        let _ = write!(event, r#","tags":{tags}"#);
     }
     event.push('}');
     event
 }
 
 fn api_get(path: &str, token: &str) -> Request<Body> {
-    Request::get(path.to_owned())
-        .header("authorization", format!("Bearer {token}"))
-        .body(Body::empty())
-        .unwrap()
+    common::get_request(path, token)
 }
 
 fn api_put_json(path: &str, token: &str, body: &str) -> Request<Body> {
-    Request::put(path.to_owned())
-        .header("content-type", "application/json")
-        .header("authorization", format!("Bearer {token}"))
-        .body(Body::from(body.to_owned()))
-        .unwrap()
+    common::put_json_request(path, token, Some("application/json"), body)
 }
 
-async fn response_json(response: axum::response::Response) -> serde_json::Value {
-    let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    match serde_json::from_slice(&bytes) {
-        Ok(value) => value,
-        Err(error) => panic!(
-            "non-JSON response ({error}): {}",
-            String::from_utf8_lossy(&bytes)
-        ),
-    }
-}
-
-async fn issue_tags(db: &SqlitePool, issue_id: i64) -> Vec<String> {
+async fn issue_tags(db: &sqlx::SqlitePool, issue_id: i64) -> Vec<String> {
     sqlx::query_scalar("SELECT tag FROM issue_tags WHERE issue_id=? ORDER BY tag")
         .bind(issue_id)
         .fetch_all(db)
@@ -349,6 +263,90 @@ async fn update_issue_tags_replaces_the_set() {
         .await
         .unwrap();
     assert_eq!(activity, 2);
+
+    // Resubmitting the same set in a different order changes nothing: the
+    // stored set is untouched and no activity is recorded.
+    let response = app
+        .oneshot(api_put_json(
+            "/api/v1/projects/demo/issues/1/tags",
+            "zpat_owner_token",
+            r#"{"tags":["team:core"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(issue_tags(&db, 1).await, vec!["team:core".to_owned()]);
+    let activity: i64 = sqlx::query_scalar("SELECT count(*) FROM issue_activity WHERE kind='tags'")
+        .fetch_one(&db)
+        .await
+        .unwrap();
+    assert_eq!(activity, 2);
+}
+
+#[tokio::test]
+async fn tag_sets_are_order_insensitive() {
+    let db = test_pool().await;
+    seed_project(&db, 1, "demo").await;
+    seed_key(&db, 1, "zbk_test_key").await;
+    seed_token(&db, 1, "zpat_owner_token").await;
+    let app = test_app(db.clone());
+    let response = app
+        .clone()
+        .oneshot(ingest_request("demo", event_body("evt-1", "boom", "")))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+
+    let response = app
+        .clone()
+        .oneshot(api_put_json(
+            "/api/v1/projects/demo/issues/1/tags",
+            "zpat_owner_token",
+            r#"{"tags":["team:core","env:prod","region:eu"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let activity_after_first: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM issue_activity WHERE kind='tags'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(activity_after_first, 1);
+
+    // Same set, reversed order: a logical no-op.
+    let response = app
+        .clone()
+        .oneshot(api_put_json(
+            "/api/v1/projects/demo/issues/1/tags",
+            "zpat_owner_token",
+            r#"{"tags":["region:eu","env:prod","team:core"]}"#,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = response_json(response).await;
+    assert_eq!(
+        body["tags"],
+        serde_json::json!(["env:prod", "region:eu", "team:core"])
+    );
+    let activity_after_reorder: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM issue_activity WHERE kind='tags'")
+            .fetch_one(&db)
+            .await
+            .unwrap();
+    assert_eq!(
+        activity_after_reorder, 1,
+        "reordering the same set must not record activity"
+    );
+    assert_eq!(
+        issue_tags(&db, 1).await,
+        vec![
+            "env:prod".to_owned(),
+            "region:eu".to_owned(),
+            "team:core".to_owned()
+        ]
+    );
 }
 
 #[tokio::test]

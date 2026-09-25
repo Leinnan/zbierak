@@ -67,18 +67,21 @@ impl ClientBuilder {
     }
 
     /// Sets the bearer token sent with each request.
+    #[must_use]
     pub fn auth_token(mut self, token: impl Into<String>) -> Self {
         self.auth_token = Some(token.into());
         self
     }
 
     /// Sets the bounded in-memory event queue size. The minimum is one.
+    #[must_use]
     pub fn queue_capacity(mut self, capacity: usize) -> Self {
         self.queue_capacity = capacity.max(1);
         self
     }
 
     /// Sets the maximum number of tracing breadcrumbs retained in memory.
+    #[must_use]
     pub fn breadcrumb_capacity(mut self, capacity: usize) -> Self {
         self.breadcrumb_capacity = capacity;
         self
@@ -87,6 +90,7 @@ impl ClientBuilder {
     /// Sets the persistent offline spool directory and maximum total bytes.
     ///
     /// A zero byte limit disables disk spooling.
+    #[must_use]
     pub fn spool(mut self, directory: impl Into<PathBuf>, max_bytes: u64) -> Self {
         self.spool_dir = directory.into();
         self.spool_max_bytes = max_bytes;
@@ -94,30 +98,35 @@ impl ClientBuilder {
     }
 
     /// Sets the timeout for an individual HTTP request.
+    #[must_use]
     pub fn request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
         self
     }
 
     /// Sets how often the sender checks the offline spool while idle.
+    #[must_use]
     pub fn retry_interval(mut self, interval: Duration) -> Self {
         self.retry_interval = interval.max(Duration::from_millis(10));
         self
     }
 
     /// Sets the release attached when an event does not specify one.
+    #[must_use]
     pub fn release(mut self, release: impl Into<String>) -> Self {
         self.release = Some(release.into());
         self
     }
 
     /// Sets the environment attached when an event does not specify one.
+    #[must_use]
     pub fn environment(mut self, environment: impl Into<String>) -> Self {
         self.environment = Some(environment.into());
         self
     }
 
     /// Sets the platform attached when an event does not specify one.
+    #[must_use]
     pub fn platform(mut self, platform: impl Into<String>) -> Self {
         self.platform = Some(platform.into());
         self
@@ -126,6 +135,7 @@ impl ClientBuilder {
     /// Installs a callback invoked synchronously before validation and queueing.
     ///
     /// Capture fails with [`CaptureError::RedactorPanicked`] if the callback panics.
+    #[must_use]
     pub fn redactor<F>(mut self, redactor: F) -> Self
     where
         F: Fn(&mut Event) + Send + Sync + 'static,
@@ -135,6 +145,12 @@ impl ClientBuilder {
     }
 
     /// Builds the client and starts its sender thread.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BuildError`] when the endpoint is empty, the HTTP client
+    /// cannot be constructed, or the spool directory/sender thread cannot
+    /// be created.
     pub fn build(self) -> Result<Client, BuildError> {
         if self.endpoint.trim().is_empty() {
             return Err(BuildError::EmptyEndpoint);
@@ -164,7 +180,7 @@ impl ClientBuilder {
                     token,
                     worker_spool,
                     retry_interval,
-                )
+                );
             })?;
 
         Ok(Client {
@@ -191,11 +207,17 @@ pub struct Client {
 
 impl Client {
     /// Starts configuring a client for the complete ingestion URL.
+    #[must_use]
     pub fn builder(endpoint: impl Into<String>) -> ClientBuilder {
         ClientBuilder::new(endpoint)
     }
 
     /// Captures a message with the given severity and returns its stable event ID.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CaptureError`] when validation or queueing fails; see
+    /// [`Client::capture_event`] for the full contract.
     pub fn capture_message(
         &self,
         message: impl Into<String>,
@@ -213,6 +235,14 @@ impl Client {
     ///
     /// Empty IDs and timestamps are populated. Existing values are retained, including when
     /// the event is retried from disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CaptureError::RedactorPanicked`] if the redactor panics,
+    /// [`CaptureError::InvalidEvent`] when validation fails, and
+    /// [`CaptureError::Spool`] when a full queue cannot spill the event to
+    /// disk. A full queue that can spill returns `Ok` — the event is safe
+    /// on disk even though it has not been sent yet.
     pub fn capture_event(&self, mut event: Event) -> Result<String, CaptureError> {
         if event.event_id.is_empty() {
             event.event_id = Uuid::new_v4().to_string();
@@ -261,6 +291,7 @@ impl Client {
     }
 
     /// Returns a tracing subscriber layer backed by this client's breadcrumb trail.
+    #[must_use]
     pub fn breadcrumb_layer(&self) -> BreadcrumbLayer {
         BreadcrumbLayer {
             breadcrumbs: Arc::clone(&self.inner.breadcrumbs),
@@ -282,17 +313,17 @@ impl Client {
                 .copied()
                 .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
                 .unwrap_or("non-string panic payload");
-            let location = info
-                .location()
-                .map(|location| {
+            let location = info.location().map_or_else(
+                || "unknown location".into(),
+                |location| {
                     format!(
                         "{}:{}:{}",
                         location.file(),
                         location.line(),
                         location.column()
                     )
-                })
-                .unwrap_or_else(|| "unknown location".into());
+                },
+            );
             let _ =
                 client.capture_message(format!("panic at {location}: {payload}"), Severity::Fatal);
             previous(info);
@@ -300,6 +331,12 @@ impl Client {
     }
 
     /// Waits for queued events and retryable spooled events up to `timeout`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FlushError::TimedOut`] when the deadline elapses first,
+    /// [`FlushError::SenderStopped`] when the sender thread is gone, and
+    /// [`FlushError::Spool`] when the spool cannot be read mid-flush.
     pub fn flush(&self, timeout: Duration) -> Result<FlushReport, FlushError> {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
         let deadline = Instant::now()
@@ -322,12 +359,13 @@ impl Client {
                 }
             }
         }
-        reply_receiver
+        let report = reply_receiver
             .recv_timeout(deadline.saturating_duration_since(Instant::now()))
             .map_err(|error| match error {
                 mpsc::RecvTimeoutError::Timeout => FlushError::TimedOut,
                 mpsc::RecvTimeoutError::Disconnected => FlushError::SenderStopped,
-            })
+            })??;
+        Ok(report)
     }
 }
 
@@ -430,11 +468,13 @@ enum Command {
     Event(Box<Event>),
     Flush {
         deadline: Instant,
-        reply: SyncSender<FlushReport>,
+        reply: SyncSender<Result<FlushReport, FlushError>>,
     },
     Shutdown,
 }
 
+// Thread entry point: arguments must be moved onto the spawned thread.
+#[allow(clippy::needless_pass_by_value)]
 fn run_sender(
     receiver: mpsc::Receiver<Command>,
     http: reqwest::blocking::Client,
@@ -508,34 +548,39 @@ fn drain_spool(
     token: Option<&str>,
     spool: &Mutex<Spool>,
     deadline: Instant,
-) -> FlushReport {
+) -> Result<FlushReport, FlushError> {
+    // SpoolError carries io::Error (not `Eq`), so it is flattened into the
+    // message here to keep FlushError comparable.
+    fn spool_error<E: std::fmt::Display>(error: E) -> FlushError {
+        FlushError::Spool(error.to_string())
+    }
     let mut delivered = 0;
     loop {
         if Instant::now() >= deadline {
-            return FlushReport {
+            return Ok(FlushReport {
                 delivered,
-                remaining: lock(spool).len(),
-            };
+                remaining: lock(spool).len().map_err(spool_error)?,
+            });
         }
-        let Some((path, event)) = lock(spool).oldest() else {
-            return FlushReport {
+        let Some((path, event)) = lock(spool).oldest().map_err(spool_error)? else {
+            return Ok(FlushReport {
                 delivered,
                 remaining: 0,
-            };
+            });
         };
         match deliver(http, endpoint, token, &event) {
             Delivery::Delivered => {
-                let _ = lock(spool).remove(&path);
+                let _ = Spool::remove(&path);
                 delivered += 1;
             }
             Delivery::PermanentFailure => {
-                let _ = lock(spool).remove(&path);
+                let _ = Spool::remove(&path);
             }
             Delivery::Retry => {
-                return FlushReport {
+                return Ok(FlushReport {
                     delivered,
-                    remaining: lock(spool).len(),
-                };
+                    remaining: lock(spool).len().map_err(spool_error)?,
+                });
             }
         }
     }
@@ -579,58 +624,72 @@ impl Spool {
         Ok(())
     }
 
-    fn oldest(&self) -> Option<(PathBuf, Event)> {
-        for path in self.paths() {
-            match fs::read(&path)
-                .ok()
-                .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            {
-                Some(event) => return Some((path, event)),
-                None => {
-                    let _ = fs::remove_file(path);
+    /// Returns the oldest readable spool entry. Files confirmed to hold
+    /// corrupt JSON are deleted so the spool can drain; transient read
+    /// failures are surfaced instead of silently dropping events.
+    fn oldest(&self) -> Result<Option<(PathBuf, Event)>, SpoolError> {
+        for path in self.paths()? {
+            let bytes = match fs::read(&path) {
+                Ok(bytes) => bytes,
+                // The file vanished concurrently; nothing to drain.
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(SpoolError::Io(error)),
+            };
+            match serde_json::from_slice::<Event>(&bytes) {
+                Ok(event) => return Ok(Some((path, event))),
+                Err(_) => {
+                    let _ = fs::remove_file(&path);
                 }
             }
         }
-        None
+        Ok(None)
     }
 
-    fn remove(&self, path: &Path) -> io::Result<()> {
+    fn remove(path: &Path) -> io::Result<()> {
         fs::remove_file(path)
     }
 
-    fn len(&self) -> usize {
-        self.paths().len()
+    /// Number of spool files currently on disk.
+    fn len(&self) -> io::Result<usize> {
+        Ok(self.paths()?.len())
     }
 
-    fn paths(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<_> = fs::read_dir(&self.directory)
-            .into_iter()
-            .flatten()
-            .flatten()
-            .map(|entry| entry.path())
-            .filter(|path| {
-                path.extension()
-                    .is_some_and(|extension| extension == "json")
-            })
-            .collect();
+    /// Lists spool files oldest first. A missing directory counts as an
+    /// empty spool; every other error is surfaced.
+    fn paths(&self) -> io::Result<Vec<PathBuf>> {
+        let entries = match fs::read_dir(&self.directory) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .map(|entry| entry.map(|entry| entry.path()))
+            .collect::<io::Result<_>>()?;
+        paths.retain(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        });
         paths.sort();
-        paths
+        Ok(paths)
     }
 
     fn enforce_bound(&self) -> io::Result<()> {
-        let paths = self.paths();
-        let mut total = 0_u64;
-        let mut sizes = Vec::with_capacity(paths.len());
-        for path in paths {
-            let size = fs::metadata(&path)?.len();
-            total = total.saturating_add(size);
-            sizes.push((path, size));
-        }
-        for (path, size) in sizes {
+        // Build (path, size) pairs in one pass instead of a path vector plus
+        // a second sizes vector.
+        let sized: Vec<(PathBuf, u64)> = self
+            .paths()?
+            .into_iter()
+            .map(|path| {
+                let size = fs::metadata(&path)?.len();
+                Ok((path, size))
+            })
+            .collect::<io::Result<_>>()?;
+        let mut total = sized.iter().map(|(_, size)| size).sum::<u64>();
+        for (path, size) in sized {
             if total <= self.max_bytes {
                 break;
             }
-            fs::remove_file(path)?;
+            fs::remove_file(&path)?;
             total = total.saturating_sub(size);
         }
         Ok(())
@@ -672,7 +731,7 @@ fn now_timestamp() -> String {
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Error returned while constructing a client.
@@ -741,10 +800,15 @@ pub enum FlushError {
     /// The sender thread has stopped.
     #[error("sender thread has stopped")]
     SenderStopped,
+    /// The spool could not be read during the flush.
+    #[error("failed to read spool: {0}")]
+    Spool(String),
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
     use super::*;
     use tracing_subscriber::layer::SubscriberExt;
 
@@ -809,10 +873,51 @@ mod tests {
         }
         let total: u64 = spool
             .paths()
+            .unwrap()
             .iter()
             .map(|path| fs::metadata(path).unwrap().len())
             .sum();
         assert!(total <= 700);
-        assert!(spool.len() < 10);
+        assert!(spool.len().unwrap() < 10);
+    }
+
+    #[test]
+    fn missing_spool_directory_counts_as_empty() {
+        let directory = tempfile::tempdir().unwrap();
+        let never_created = directory.path().join("absent");
+        let spool = Spool {
+            directory: never_created.clone(),
+            max_bytes: 0,
+        };
+        assert_eq!(spool.paths().unwrap(), Vec::<PathBuf>::new());
+        assert_eq!(spool.len().unwrap(), 0);
+        assert_eq!(spool.oldest().unwrap(), None);
+    }
+
+    #[test]
+    fn corrupt_spool_files_are_removed_but_transient_failures_are_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let spool = Spool {
+            directory: directory.path().to_path_buf(),
+            max_bytes: 0,
+        };
+        // A corrupt file is confirmed garbage: dropped so the spool drains.
+        let corrupt = directory.path().join("1-corrupt.json");
+        fs::write(&corrupt, b"{not json").unwrap();
+        assert_eq!(spool.oldest().unwrap(), None);
+        assert!(!corrupt.exists());
+
+        // A read failure is transient: surfaced, and the file survives.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unreadable = directory.path().join("2-unreadable.json");
+            fs::write(&unreadable, b"{}").unwrap();
+            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o000)).unwrap();
+            let result = spool.oldest();
+            fs::set_permissions(&unreadable, fs::Permissions::from_mode(0o644)).unwrap();
+            assert!(result.is_err(), "unreadable file must surface an error");
+            assert!(unreadable.exists(), "unreadable file must not be deleted");
+        }
     }
 }

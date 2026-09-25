@@ -41,8 +41,21 @@ zbierak-protocol = { path = "crates/zbierak-protocol" }
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
 
-[lints.rust]
+# Workspace-wide lint policy, inherited by every member through
+# `[lints] workspace = true`. Panics are denied in production code; test
+# modules carry narrowly scoped allowances.
+[workspace.lints.rust]
 unsafe_code = "forbid"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+
+[lints]
+workspace = true
 
 [features]
 docs = ["dep:utoipa", "dep:utoipa-scalar", "zbierak-protocol/schema"]

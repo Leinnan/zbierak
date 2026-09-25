@@ -1,6 +1,7 @@
 //! Normalization and validation for flat string issue tags.
 
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 /// Maximum number of tags stored on a single issue.
 pub const MAX_TAGS: usize = 50;
@@ -8,11 +9,12 @@ pub const MAX_TAGS: usize = 50;
 /// Maximum length of a single tag.
 const MAX_TAG_LEN: usize = 64;
 
-/// Normalizes one raw tag: trims whitespace and enforces the tag charset.
+/// Validates one raw tag without allocating: trims whitespace and enforces
+/// the tag charset, returning the trimmed form.
 ///
 /// Tags may not contain whitespace or commas because the operator UI collects
 /// them as comma-separated lists and query strings.
-pub fn normalize_tag(raw: &str) -> Result<String, String> {
+pub fn validate_tag(raw: &str) -> Result<&str, String> {
     let tag = raw.trim();
     if tag.is_empty() {
         return Err("must not be empty".into());
@@ -26,23 +28,25 @@ pub fn normalize_tag(raw: &str) -> Result<String, String> {
     {
         return Err("must not contain whitespace or commas".into());
     }
-    Ok(tag.to_owned())
+    Ok(tag)
 }
 
 /// Normalizes a list of raw tags, skipping empty entries and dropping
-/// duplicates while preserving order.
+/// duplicates while preserving order. Only accepted unique tags are
+/// allocated.
 pub fn normalize_tags<'a, I>(raw: I) -> Result<Vec<String>, String>
 where
     I: IntoIterator<Item = &'a str>,
 {
     let mut tags = Vec::new();
+    let mut seen = HashSet::new();
     for value in raw {
         if value.trim().is_empty() {
             continue;
         }
-        let tag = normalize_tag(value).map_err(|error| format!("tag {error}"))?;
-        if !tags.contains(&tag) {
-            tags.push(tag);
+        let tag = validate_tag(value).map_err(|error| format!("tag {error}"))?;
+        if seen.insert(tag) {
+            tags.push(tag.to_owned());
         }
     }
     if tags.len() > MAX_TAGS {
@@ -64,37 +68,41 @@ pub fn normalize_comma_separated(input: &str) -> Result<Vec<String>, String> {
 pub fn labels_from_event_tags(event_tags: &BTreeMap<String, String>) -> Vec<String> {
     event_tags
         .iter()
-        .map(|(key, value)| {
-            if value.is_empty() {
-                key.clone()
+        .filter_map(|(key, value)| {
+            let label = if value.is_empty() {
+                key.as_str()
             } else {
-                format!("{key}:{value}")
-            }
+                return validate_tag(&format!("{key}:{value}"))
+                    .ok()
+                    .map(str::to_owned);
+            };
+            validate_tag(label).ok().map(str::to_owned)
         })
-        .filter_map(|label| normalize_tag(&label).ok())
         .collect()
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
+
     use super::*;
 
     #[test]
-    fn normalize_tag_trims_and_validates() {
-        assert_eq!(normalize_tag(" env:prod "), Ok("env:prod".into()));
-        assert!(normalize_tag("").is_err());
-        assert!(normalize_tag("   ").is_err());
-        assert!(normalize_tag("a b").is_err());
-        assert!(normalize_tag("a,b").is_err());
-        assert!(normalize_tag(&"x".repeat(65)).is_err());
-        assert_eq!(normalize_tag("x").unwrap().len(), 1);
+    fn validate_tag_trims_and_rejects() {
+        assert_eq!(validate_tag(" env:prod "), Ok("env:prod"));
+        assert!(validate_tag("").is_err());
+        assert!(validate_tag("   ").is_err());
+        assert!(validate_tag("a b").is_err());
+        assert!(validate_tag("a,b").is_err());
+        assert!(validate_tag("x".repeat(65).as_str()).is_err());
+        assert_eq!(validate_tag("x").unwrap().len(), 1);
     }
 
     #[test]
     fn normalize_tags_dedupes_and_caps() {
         let tags = normalize_tags(["a", " a ", "b", ""]).unwrap();
         assert_eq!(tags, vec!["a".to_owned(), "b".to_owned()]);
-        let many: Vec<String> = (0..MAX_TAGS + 1).map(|i| format!("t{i}")).collect();
+        let many: Vec<String> = (0..=MAX_TAGS).map(|i| format!("t{i}")).collect();
         let refs: Vec<&str> = many.iter().map(String::as_str).collect();
         assert!(normalize_tags(refs).is_err());
     }
