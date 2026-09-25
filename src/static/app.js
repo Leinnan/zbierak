@@ -22,7 +22,19 @@
         code.appendChild(row);
       });
       code.dataset.prepared = "true";
-      if (applicationFrames > 0) code.closest(".stack-trace").dataset.mode = "app";
+      if (applicationFrames > 0) {
+        var card = code.closest(".stack-card");
+        if (card) card.dataset.mode = "app";
+      }
+    });
+    root.querySelectorAll(".stack-frames:not([data-prepared])").forEach(function (list) {
+      list.dataset.prepared = "true";
+      // Server-side in_app flags are authoritative; default to the
+      // application view only when at least one frame is classified.
+      if (list.querySelector(".stack-frame.is-app")) {
+        var card = list.closest(".stack-card");
+        if (card) card.dataset.mode = "app";
+      }
     });
   }
 
@@ -170,9 +182,8 @@
 
       var modeButton = event.target.closest("[data-stack-mode]");
       if (modeButton) {
-        var trace = document.querySelector(".stack-trace");
-        if (!trace) return;
-        trace.dataset.mode = modeButton.dataset.stackMode === "app" ? "app" : "all";
+        var stackCard = modeButton.closest(".stack-card");
+        if (stackCard) stackCard.dataset.mode = modeButton.dataset.stackMode === "app" ? "app" : "all";
         document.querySelectorAll("[data-stack-mode]").forEach(function (button) {
           button.classList.toggle("is-active", button === modeButton);
         });

@@ -70,6 +70,15 @@ mod async_client;
 pub mod bevy;
 #[cfg(feature = "blocking")]
 mod blocking;
+#[cfg(feature = "stacktraces")]
+mod stacktrace;
+#[cfg(not(feature = "stacktraces"))]
+mod stacktrace {
+    /// Stack capture is compiled out; events carry no frames.
+    pub(crate) fn capture_frames() -> Vec<zbierak_protocol::StackFrame> {
+        Vec::new()
+    }
+}
 
 #[cfg(feature = "async")]
 pub use async_client::{AsyncClient, AsyncClientBuilder};
@@ -383,14 +392,15 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Renders the standard "panic at location: payload" message for a panic hook.
-fn panic_hook_message(info: &panic::PanicHookInfo<'_>) -> String {
+/// Splits a panic into its rendered location and payload parts.
+fn panic_parts(info: &panic::PanicHookInfo<'_>) -> (String, String) {
     let payload = info
         .payload()
         .downcast_ref::<&str>()
         .copied()
         .or_else(|| info.payload().downcast_ref::<String>().map(String::as_str))
-        .unwrap_or("non-string panic payload");
+        .unwrap_or("non-string panic payload")
+        .to_owned();
     let location = info.location().map_or_else(
         || "unknown location".into(),
         |location| {
@@ -402,7 +412,73 @@ fn panic_hook_message(info: &panic::PanicHookInfo<'_>) -> String {
             )
         },
     );
-    format!("panic at {location}: {payload}")
+    (location, payload)
+}
+
+/// Builds the full event sent by the panic hook: the flat panic message the
+/// rest of the SDK keys on, plus structured error details and stack frames.
+pub(crate) fn panic_event(info: &panic::PanicHookInfo<'_>) -> Event {
+    let (location, payload) = panic_parts(info);
+    panic_event_parts(&location, &payload)
+}
+
+/// [`panic_event`] without the hook-info wrapper, so the shape is testable
+/// without constructing `PanicHookInfo` (private on stable).
+fn panic_event_parts(location: &str, payload: &str) -> Event {
+    Event {
+        message: format!("panic at {location}: {payload}"),
+        severity: Severity::Fatal,
+        error: Some(ErrorInfo {
+            type_name: "panic".into(),
+            value: Some(payload.to_owned()),
+            stack_frames: stacktrace::capture_frames(),
+        }),
+        ..Event::default()
+    }
+}
+
+/// Upper bound on cause-chain entries recorded per event.
+const MAX_ERROR_CHAIN: usize = 10;
+
+/// Flattens an error's `source()` chain into `error_chain` context entries,
+/// newest first, so the UI can show what an error originated from.
+fn error_chain_context(error: &(dyn std::error::Error + 'static)) -> Vec<serde_json::Value> {
+    let mut chain = Vec::new();
+    let mut source = error.source();
+    while let Some(cause) = source {
+        if chain.len() >= MAX_ERROR_CHAIN {
+            break;
+        }
+        chain.push(serde_json::json!({
+            "type": "cause",
+            "value": cause.to_string(),
+        }));
+        source = cause.source();
+    }
+    chain
+}
+
+/// Builds a complete event for a captured error: the error text as the
+/// message, the concrete type and stack in [`ErrorInfo`], and the cause chain
+/// in the `error_chain` context.
+pub(crate) fn error_event<E: std::error::Error + 'static>(error: &E, severity: Severity) -> Event {
+    let message = error.to_string();
+    let chain = error_chain_context(error);
+    let mut contexts = BTreeMap::new();
+    if !chain.is_empty() {
+        contexts.insert("error_chain".into(), serde_json::Value::Array(chain));
+    }
+    Event {
+        message: message.clone(),
+        severity,
+        error: Some(ErrorInfo {
+            type_name: std::any::type_name::<E>().to_owned(),
+            value: Some(message),
+            stack_frames: stacktrace::capture_frames(),
+        }),
+        contexts,
+        ..Event::default()
+    }
 }
 
 /// Error returned while constructing a client.
@@ -537,5 +613,56 @@ mod tests {
             assert!(result.is_err(), "unreadable file must surface an error");
             assert!(unreadable.exists(), "unreadable file must not be deleted");
         }
+    }
+
+    #[test]
+    fn panic_event_keeps_message_and_adds_error_details() {
+        let event = panic_event_parts("src/main.rs:10:5", "boom");
+        assert_eq!(event.message, "panic at src/main.rs:10:5: boom");
+        assert_eq!(event.severity, Severity::Fatal);
+        let error = event.error.expect("panic events carry error details");
+        assert_eq!(error.type_name, "panic");
+        assert_eq!(error.value.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn error_event_carries_type_chain_and_frames() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("top failed: {source}")]
+        struct Top {
+            #[source]
+            source: Inner,
+        }
+
+        #[derive(Debug, thiserror::Error)]
+        #[error("inner broke")]
+        struct Inner;
+
+        let error = Top { source: Inner };
+        let event = error_event(&error, Severity::Error);
+        assert_eq!(event.message, "top failed: inner broke");
+        let details = event.error.expect("error events carry error details");
+        assert!(details.type_name.ends_with("Top"));
+        assert_eq!(details.value.as_deref(), Some("top failed: inner broke"));
+        let chain = event
+            .contexts
+            .get("error_chain")
+            .and_then(serde_json::Value::as_array)
+            .expect("cause chain recorded");
+        assert_eq!(chain.len(), 1);
+        assert_eq!(
+            chain[0].get("value").and_then(serde_json::Value::as_str),
+            Some("inner broke")
+        );
+    }
+
+    #[test]
+    fn error_event_without_causes_omits_chain_context() {
+        #[derive(Debug, thiserror::Error)]
+        #[error("standalone")]
+        struct Standalone;
+
+        let event = error_event(&Standalone, Severity::Warning);
+        assert!(event.contexts.is_empty());
     }
 }

@@ -183,6 +183,29 @@ struct EventView {
     occurred_at: String,
     environment: String,
     release: Option<String>,
+    /// Flattened frames for clipboard export, empty without frames.
+    stacktrace: String,
+    stack_frames: Vec<FrameView>,
+}
+
+/// One rendered stack frame; `in_app` drives the application/system styling
+/// server-side so the browser never has to guess from the text.
+#[cfg_attr(feature = "docs", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize)]
+pub struct FrameView {
+    number: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    in_app: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    function: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    module: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    filename: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    column: Option<u64>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -878,6 +901,9 @@ async fn load_issue_details(
             payload.get("release").cloned().unwrap_or(Value::Null),
         );
         object.insert("stacktrace".into(), json!(format_stacktrace(payload)));
+        object.insert("stack_frames".into(), json!(stack_frames_view(payload)));
+        object.insert("error_type".into(), json!(error_type_view(payload)));
+        object.insert("error_value".into(), json!(error_value_view(payload)));
     }
     Ok(IssueDetails {
         project,
@@ -2479,6 +2505,125 @@ pub async fn get_issue(
     Ok(Json(issue))
 }
 
+#[derive(Deserialize)]
+pub struct EventListQuery {
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+/// Event as exposed by the management API: rendered metadata plus the stack
+/// frames resolved from the stored payload. The raw payload itself is not
+/// included; frames carry the browsable information.
+#[cfg_attr(feature = "docs", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize)]
+pub struct ApiEventJson {
+    id: String,
+    occurred_at: String,
+    environment: String,
+    release: Option<String>,
+    message: String,
+    severity: String,
+    error_type: Option<String>,
+    error_value: Option<String>,
+    stack_frames: Vec<FrameView>,
+}
+
+#[cfg_attr(feature = "docs", utoipa::path(
+    get,
+    path = "/api/v1/projects/{slug}/issues/{issue_id}/events",
+    tag = "issues",
+    operation_id = "listIssueEvents",
+    params(
+        ("slug" = String, Path, description = "Project slug"),
+        ("issue_id" = i64, Path, description = "Issue identifier"),
+        ("limit" = Option<u32>, Query, description = "Page size, 1-100 (default 20)"),
+        ("offset" = Option<u32>, Query, description = "Number of events to skip"),
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Events newest first with resolved stack frames", body = [ApiEventJson]),
+        (status = 400, description = "Invalid pagination parameters", body = ApiErrorResponse),
+        (status = 401, description = "Missing or invalid API token", body = ApiErrorResponse),
+        (status = 404, description = "Unknown project, issue, or no membership", body = ApiErrorResponse),
+    )
+))]
+pub async fn list_issue_events(
+    State(state): State<AppState>,
+    ApiPath((slug, issue_id)): ApiPath<(String, i64)>,
+    ApiPrincipal { user_id }: ApiPrincipal,
+    ApiQuery(query): ApiQuery<EventListQuery>,
+) -> Result<Json<Vec<ApiEventJson>>, ApiError> {
+    let limit = query.limit.unwrap_or(20);
+    if !(1..=100).contains(&limit) {
+        return Err(AppError::BadRequest("limit must be between 1 and 100".into()).into());
+    }
+    let project_id =
+        auth::require_project_role(&state, user_id, &slug, ProjectRole::Viewer).await?;
+    let issue_count =
+        sqlx::query_scalar::<_, i64>("SELECT count(*) FROM issues WHERE id=? AND project_id=?")
+            .bind(issue_id)
+            .bind(project_id)
+            .fetch_one(&state.db)
+            .await?;
+    if issue_count == 0 {
+        return Err(AppError::NotFound.into());
+    }
+    let rows = sqlx::query_as::<_, EventRow>(
+        "SELECT r.producer_event_id AS id, e.payload_json, e.received_at FROM events e
+         JOIN raw_events r ON r.id=e.id WHERE e.issue_id=?
+         ORDER BY e.received_at DESC, e.id LIMIT ? OFFSET ?",
+    )
+    .bind(issue_id)
+    .bind(i64::from(limit))
+    .bind(i64::from(query.offset.unwrap_or(0)))
+    .fetch_all(&state.db)
+    .await?;
+    let mut events = Vec::with_capacity(rows.len());
+    for row in rows {
+        let payload = serde_json::from_str::<Value>(&row.payload_json).unwrap_or(Value::Null);
+        let error_type = error_type_view(&payload);
+        let error_value = error_value_view(&payload);
+        events.push(ApiEventJson {
+            id: row.id,
+            occurred_at: payload
+                .get("timestamp")
+                .and_then(Value::as_str)
+                .map_or_else(|| row.received_at.to_string(), str::to_owned),
+            environment: payload
+                .get("environment")
+                .and_then(Value::as_str)
+                .unwrap_or("default")
+                .to_owned(),
+            release: payload
+                .get("release")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            message: payload
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_owned(),
+            severity: payload
+                .get("severity")
+                .and_then(Value::as_str)
+                .unwrap_or("error")
+                .to_owned(),
+            error_type: if error_type.is_empty() {
+                None
+            } else {
+                Some(error_type)
+            },
+            error_value: if error_value.is_empty() {
+                None
+            } else {
+                Some(error_value)
+            },
+            stack_frames: stack_frames_view(&payload),
+        });
+    }
+    Ok(Json(events))
+}
+
 #[cfg_attr(feature = "docs", utoipa::path(
     put,
     path = "/api/v1/projects/{slug}/issues/{issue_id}/tags",
@@ -2923,7 +3068,73 @@ fn event_view(row: EventRow, payload: &Value) -> EventView {
             .get("release")
             .and_then(Value::as_str)
             .map(str::to_owned),
+        stacktrace: format_stacktrace(payload),
+        stack_frames: stack_frames_view(payload),
     }
+}
+
+/// Extracts structured stack frames for display, mirroring
+/// [`format_stacktrace`] frame selection: the error-owned frames when
+/// present, otherwise the event-level list. Entries without a function and
+/// without a filename are skipped so malformed payloads cannot break rendering.
+fn stack_frames_view(payload: &Value) -> Vec<FrameView> {
+    let frames = payload
+        .get("error")
+        .and_then(|error| error.get("stack_frames"))
+        .or_else(|| payload.get("stack_frames"))
+        .and_then(Value::as_array);
+    let Some(frames) = frames else {
+        return Vec::new();
+    };
+    frames
+        .iter()
+        .enumerate()
+        .filter_map(|(index, frame)| {
+            let function = frame
+                .get("function")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let filename = frame
+                .get("filename")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if function.is_none() && filename.is_none() {
+                return None;
+            }
+            Some(FrameView {
+                number: index + 1,
+                in_app: frame.get("in_app").and_then(Value::as_bool),
+                module: frame
+                    .get("module")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                function,
+                filename,
+                line: frame.get("line").and_then(Value::as_u64),
+                column: frame.get("column").and_then(Value::as_u64),
+            })
+        })
+        .collect()
+}
+
+/// The error `type` from a payload, empty when absent.
+fn error_type_view(payload: &Value) -> String {
+    payload
+        .get("error")
+        .and_then(|error| error.get("type"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The error `value` from a payload, empty when absent.
+fn error_value_view(payload: &Value) -> String {
+    payload
+        .get("error")
+        .and_then(|error| error.get("value"))
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_owned()
 }
 
 fn format_stacktrace(payload: &Value) -> String {
@@ -3020,6 +3231,20 @@ fn issue_markdown(details: &IssueDetails) -> String {
     if !message.is_empty() {
         let _ = writeln!(out, "## Message\n");
         let _ = writeln!(out, "{message}\n");
+    }
+
+    let error_type = issue_field(issue, "error_type");
+    if !error_type.is_empty() {
+        let _ = writeln!(out, "## Error\n");
+        let error_value = issue_field(issue, "error_value");
+        if error_value.is_empty() {
+            let _ = writeln!(out, "`{error_type}`\n");
+        } else {
+            let fence = fence_for(&format!("{error_type}: {error_value}"));
+            let _ = writeln!(out, "{fence}");
+            let _ = writeln!(out, "{error_type}: {error_value}");
+            let _ = writeln!(out, "{fence}\n");
+        }
     }
 
     let stacktrace = issue_field(issue, "stacktrace");
@@ -3249,6 +3474,8 @@ mod tests {
             occurred_at: "2026-09-24T12:00:00Z".into(),
             environment: "production".into(),
             release: Some("1.2.3".into()),
+            stacktrace: String::new(),
+            stack_frames: Vec::new(),
         };
         let markdown = issue_markdown(&details(issue_value(), vec![event]));
 
@@ -3332,5 +3559,87 @@ mod tests {
         assert_eq!(fence_for("plain"), "```");
         assert_eq!(fence_for("a ``` b"), "````");
         assert_eq!(fence_for("a ```` b"), "`````");
+    }
+
+    #[test]
+    fn stack_frames_view_prefers_error_frames_and_numbers_them() {
+        let payload = json!({
+            "stack_frames": [{"function": "top", "filename": "a.rs"}],
+            "error": {
+                "type": "io::Error",
+                "value": "refused",
+                "stack_frames": [
+                    {"function": "inner", "filename": "b.rs", "line": 7, "in_app": true},
+                    {"module": "net", "function": "read", "column": 3, "in_app": false}
+                ]
+            }
+        });
+        let frames = stack_frames_view(&payload);
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].number, 1);
+        assert_eq!(frames[0].function.as_deref(), Some("inner"));
+        assert_eq!(frames[0].line, Some(7));
+        assert_eq!(frames[0].in_app, Some(true));
+        assert_eq!(frames[1].number, 2);
+        assert_eq!(frames[1].module.as_deref(), Some("net"));
+        assert_eq!(frames[1].column, Some(3));
+        assert_eq!(frames[1].in_app, Some(false));
+    }
+
+    #[test]
+    fn stack_frames_view_falls_back_to_event_frames() {
+        let payload = json!({
+            "stack_frames": [
+                {"function": "solo"},
+                {"filename": "only-file.rs"}
+            ]
+        });
+        let frames = stack_frames_view(&payload);
+        assert_eq!(frames.len(), 2);
+        assert!(frames.iter().all(|frame| frame.in_app.is_none()));
+    }
+
+    #[test]
+    fn stack_frames_view_skips_unusable_entries() {
+        let payload = json!({
+            "stack_frames": [
+                {"line": 12},
+                {"function": "usable", "filename": "c.rs"}
+            ]
+        });
+        let frames = stack_frames_view(&payload);
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].function.as_deref(), Some("usable"));
+        assert_eq!(frames[0].number, 2, "original position numbering");
+    }
+
+    #[test]
+    fn stack_frames_view_tolerates_absent_and_malformed_payloads() {
+        assert!(stack_frames_view(&json!({})).is_empty());
+        assert!(stack_frames_view(&json!({"stack_frames": "oops"})).is_empty());
+        assert!(stack_frames_view(&json!({"error": null})).is_empty());
+    }
+
+    #[test]
+    fn error_type_and_value_views_read_the_error_object() {
+        let payload = json!({"error": {"type": "io::Error", "value": "refused"}});
+        assert_eq!(error_type_view(&payload), "io::Error");
+        assert_eq!(error_value_view(&payload), "refused");
+        assert!(error_type_view(&json!({})).is_empty());
+        assert!(error_value_view(&json!({"error": {}})).is_empty());
+    }
+
+    #[test]
+    fn markdown_export_includes_error_header() {
+        let mut value = details(issue_value(), Vec::new());
+        if let Some(object) = value.issue.as_object_mut() {
+            object.insert("error_type".into(), json!("io::Error"));
+            object.insert("error_value".into(), json!("connection refused"));
+            object.insert("stacktrace".into(), json!("main at src/main.rs:10"));
+        }
+        let markdown = issue_markdown(&value);
+        assert!(markdown.contains("## Error"));
+        assert!(markdown.contains("io::Error: connection refused"));
+        assert!(markdown.contains("## Stack trace"));
     }
 }

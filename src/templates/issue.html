@@ -19,7 +19,15 @@
     <section class="card stack-card" aria-labelledby="stack-title">
       <div class="card-header"><div><p class="eyebrow">Latest occurrence</p><h2 class="card-title" id="stack-title">Stack trace</h2></div><button class="btn btn-sm btn-outline-secondary" type="button" data-copy-target="#stack-trace">Copy stack</button></div>
       <div class="stack-toolbar"><button type="button" class="stack-toggle is-active" data-stack-mode="app">Application frames</button><button type="button" class="stack-toggle" data-stack-mode="all">All frames</button></div>
+      {% if issue.error_type | default(value="") %}
+      <div class="error-headline"><code class="error-type">{{ issue.error_type }}</code>{% if issue.error_value | default(value="") %}<span class="error-value">{{ issue.error_value }}</span>{% endif %}</div>
+      {% endif %}
+      {% if issue.stack_frames | default(value=[]) | length > 0 %}
+      <div class="stack-scroll">{{ <ui.stack_frames frames={issue.stack_frames} /> }}</div>
+      <pre id="stack-trace" class="visually-hidden"><code>{{ issue.stacktrace }}</code></pre>
+      {% else %}
       <pre id="stack-trace" class="stack-trace" tabindex="0"><code>{{ issue.stacktrace }}</code></pre>
+      {% endif %}
     </section>
     {% endif %}
     <section class="event-section" aria-labelledby="events-title">
@@ -29,6 +37,11 @@
         <details class="card event-card" {% if loop.first %}open{% endif %}>
           <summary><span class="event-dot" aria-hidden="true"></span><span><strong><time class="js-local-time" datetime="{{ event.occurred_at }}">{{ event.occurred_at }}</time></strong><small>{{ event.environment }}{% if event.release %} · {{ event.release }}{% endif %} · <code>{{ event.id }}</code></small></span><span class="event-chevron" aria-hidden="true">+</span></summary>
           <div class="event-body">
+            {% if event.stack_frames | default(value=[]) | length > 0 %}
+            <div class="payload-heading"><h3>Stack trace</h3><button class="btn btn-sm btn-outline-secondary" type="button" data-copy-target="#event-stack-{{ loop.index }}">Copy stack</button></div>
+            <div class="stack-scroll" data-event-stack>{{ <ui.stack_frames frames={event.stack_frames} /> }}</div>
+            <pre id="event-stack-{{ loop.index }}" class="visually-hidden"><code>{{ event.stacktrace }}</code></pre>
+            {% endif %}
             <div class="payload-heading"><h3>Event payload</h3><button class="btn btn-sm btn-outline-secondary" type="button" data-copy-target="#event-{{ loop.index }}">Copy JSON</button></div>
             <pre class="context-json" tabindex="0"><code id="event-{{ loop.index }}" class="js-json">{{ event.payload_json }}</code></pre>
           </div>

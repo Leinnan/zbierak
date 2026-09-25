@@ -70,7 +70,7 @@ async fn theme_bootstrap_loads_before_application_styles() {
     .unwrap();
 
     let initializer = body.find("/static/theme-init.js").unwrap();
-    let stylesheet = body.find("/static/app.css?v=6").unwrap();
+    let stylesheet = body.find("/static/app.css?v=7").unwrap();
     assert!(initializer < stylesheet);
 }
 

@@ -252,6 +252,26 @@ mod native {
             }
         }
 
+        /// Captures an error value with its cause chain and the current stack
+        /// frames, and returns its stable event ID.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`CaptureError`] when validation or queueing fails; see the
+        /// underlying client for the full contract.
+        pub fn capture_error<E: std::error::Error + 'static>(
+            &self,
+            error: &E,
+            severity: Severity,
+        ) -> Result<String, CaptureError> {
+            match self {
+                #[cfg(feature = "blocking")]
+                Self::Blocking(client) => client.capture_error(error, severity),
+                #[cfg(feature = "async")]
+                Self::Async(client) => client.capture_error(error, severity),
+            }
+        }
+
         /// Adds a breadcrumb directly to the bounded in-memory trail.
         pub fn add_breadcrumb(&self, breadcrumb: Breadcrumb) {
             match self {
@@ -558,6 +578,19 @@ mod wasm {
         ///
         /// Never returns successfully.
         pub fn capture_event(&self, _event: Event) -> Result<String, CaptureError> {
+            Err(CaptureError::SenderStopped)
+        }
+
+        /// Stub: never called, the type cannot be constructed.
+        ///
+        /// # Errors
+        ///
+        /// Never returns successfully.
+        pub fn capture_error<E: std::error::Error + 'static>(
+            &self,
+            _error: &E,
+            _severity: Severity,
+        ) -> Result<String, CaptureError> {
             Err(CaptureError::SenderStopped)
         }
 

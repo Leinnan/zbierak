@@ -123,6 +123,10 @@ impl Event {
                 "must contain at most 1000 entries",
             ));
         }
+        validate_stack_frames("stack_frames", &self.stack_frames)?;
+        if let Some(error) = &self.error {
+            validate_stack_frames("error.stack_frames", &error.stack_frames)?;
+        }
         if let Some(parts) = &self.fingerprint {
             if parts.is_empty() || parts.len() > 10 {
                 return Err(ValidationError::new(
@@ -358,6 +362,36 @@ fn validate_optional(field: &'static str, value: &str, max: usize) -> Result<(),
     Ok(())
 }
 
+/// Upper bound on stack frames accepted per event, on the event itself and
+/// inside its error object, so a payload cannot smuggle unbounded arrays
+/// past the tag and breadcrumb limits.
+const MAX_STACK_FRAMES: usize = 256;
+
+/// Upper bound on one string field inside a stack frame.
+const MAX_FRAME_FIELD_BYTES: usize = 1_024;
+
+fn validate_stack_frames(
+    field: &'static str,
+    frames: &[StackFrame],
+) -> Result<(), ValidationError> {
+    if frames.len() > MAX_STACK_FRAMES {
+        return Err(ValidationError::new(
+            field,
+            format!("must contain at most {MAX_STACK_FRAMES} frames"),
+        ));
+    }
+    for frame in frames {
+        for value in [
+            frame.function.as_deref(),
+            frame.filename.as_deref(),
+            frame.module.as_deref(),
+        ] {
+            validate_optional(field, value.unwrap_or(""), MAX_FRAME_FIELD_BYTES)?;
+        }
+    }
+    Ok(())
+}
+
 /// Parsed timestamps must land within a sane operational window (these
 /// bounds, inclusive) so clock malfunctions cannot poison stored data.
 const MIN_TIMESTAMP_YEAR: i32 = 2000;
@@ -480,5 +514,56 @@ mod tests {
             let error = event.validate().unwrap_err();
             assert_eq!(error.field(), "timestamp", "wrong field for {stamp}");
         }
+    }
+
+    #[test]
+    fn oversized_frame_arrays_are_rejected_with_their_field_path() {
+        let frames = || {
+            (0..257)
+                .map(|_| StackFrame {
+                    function: Some("f".into()),
+                    ..StackFrame::default()
+                })
+                .collect::<Vec<_>>()
+        };
+        let mut event = valid_event();
+        event.stack_frames = frames();
+        assert_eq!(event.validate().unwrap_err().field(), "stack_frames");
+
+        event.stack_frames.clear();
+        event.error = Some(ErrorInfo {
+            type_name: "E".into(),
+            value: None,
+            stack_frames: frames(),
+        });
+        assert_eq!(event.validate().unwrap_err().field(), "error.stack_frames");
+    }
+
+    #[test]
+    fn oversized_frame_fields_are_rejected() {
+        let mut event = valid_event();
+        event.stack_frames = vec![StackFrame {
+            function: Some("x".repeat(1_025)),
+            ..StackFrame::default()
+        }];
+        assert_eq!(event.validate().unwrap_err().field(), "stack_frames");
+    }
+
+    #[test]
+    fn frames_within_bounds_are_accepted() {
+        let mut event = valid_event();
+        event.error = Some(ErrorInfo {
+            type_name: "E".into(),
+            value: None,
+            stack_frames: vec![StackFrame {
+                filename: Some("src/main.rs".into()),
+                function: Some("main".into()),
+                module: Some("app".into()),
+                line: Some(1),
+                column: Some(2),
+                in_app: Some(true),
+            }],
+        });
+        assert!(event.validate().is_ok());
     }
 }

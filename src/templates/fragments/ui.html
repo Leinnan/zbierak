@@ -34,3 +34,17 @@
 <span class="avatar avatar-{{ size }} avatar-generated avatar-tone-{{ user_id % 6 }}" aria-hidden="true">{{ name | default(value="?") | truncate(length=1, end="") | upper }}</span>
 {% endif %}
 {% endcomponent ui.avatar %}
+
+{# Structured stack frames. `in_app` comes from the event payload, so the
+   application/system split is exact for SDK events and absent (rendered
+   unclassified) for clients that do not send it. #}
+{% component ui.stack_frames(frames: array = []) %}
+<ol class="stack-frames">
+  {% for frame in frames %}
+  <li class="stack-frame{% if frame.in_app %} is-app{% endif %}{% if frame.in_app == false %} is-system{% endif %}">
+    <span class="frame-number" aria-hidden="true">{{ frame.number }}</span>
+    <span class="frame-body">{% if frame.function %}<code class="frame-function">{% if frame.module %}{{ frame.module }}::{{ frame.function }}{% else %}{{ frame.function }}{% endif %}</code>{% endif %}{% if frame.filename %}<span class="frame-location">{{ frame.filename }}{% if frame.line %}:{{ frame.line }}{% if frame.column %}:{{ frame.column }}{% endif %}{% endif %}</span>{% endif %}</span>
+  </li>
+  {% endfor %}
+</ol>
+{% endcomponent ui.stack_frames %}

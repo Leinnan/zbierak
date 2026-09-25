@@ -110,6 +110,18 @@ separates it from potential future work.
   removals (`comment_deleted`) are recorded in an issue activity stream. An
   event matching a resolved issue reopens it and records a system regression
   entry; ignored issues are not automatically reopened.
+- The issue page renders the latest occurrence's stack as structured frames
+  (frame number, function with module, `file:line:column`) classified
+  application/system server-side from the payload's `in_app` flags, with the
+  error type and value shown as a headline; a toolbar filters to application
+  frames. When frames carry no `in_app` data the page falls back to the
+  previous heuristic text classification. Every listed event shows its own
+  stack plus the raw payload JSON, and the Markdown export includes the error
+  headline and flattened trace.
+- The management API exposes stack frames without raw payloads via
+  `GET /api/v1/projects/{slug}/issues/{issue_id}/events` (`limit` 1-100,
+  default 20; `offset`), returning each event's metadata, error type/value,
+  and resolved frames.
 - Any issue can be exported as Markdown via
   `GET /projects/{slug}/issues/{issue_id}/export.md`, including title, status,
   event metadata, comment bodies (removed comments export as a tombstone), and
@@ -129,8 +141,10 @@ separates it from potential future work.
 - Optional data includes structured error details, release, environment,
   platform, top-level and error stack frames, breadcrumbs, tags, contexts, user
   data, and explicit fingerprint components.
-- Validation bounds message length, tags, contexts, breadcrumbs, and fingerprint
-  components. Timestamps must parse as RFC 3339 and fall between years 2000 and
+- Validation bounds message length, tags, contexts, breadcrumbs, fingerprint
+  components, and stack frames (at most 256 per event with 1024-byte
+  string fields on both the event level and inside the error object).
+  Timestamps must parse as RFC 3339 and fall between years 2000 and
   2100, in addition to a 64-byte length limit.
 - Producer `event_id` is unique within a project. Repeating an ID with identical
   content returns the existing issue and fingerprint without changing issue
@@ -167,6 +181,16 @@ separates it from potential future work.
   environment, and platform defaults, and accepts a synchronous redaction hook.
 - `BreadcrumbLayer` retains a bounded set of tracing events and attaches them to
   captured events.
+- With the default `stacktraces` feature, panics captured by the installed hook
+  carry structured `ErrorInfo` (type `panic`, payload, and up to 128 resolved
+  stack frames via the `backtrace` crate); the feature can be disabled to drop
+  the dependency and capture work. Frames above the unwinding entry point and
+  SDK/runtime frames are removed, and toolchain or registry source paths are
+  classified `in_app: false` while application paths are `in_app: true`.
+- `capture_error` records any `std::error::Error` value: the error text becomes
+  the message, the concrete type and stack fill `ErrorInfo`, and the `source()`
+  chain (up to ten causes) lands in the `error_chain` context. Both client
+  flavors and the Bevy integration expose it.
 - Retryable events can be stored in a size-bounded disk spool. Transport errors,
   HTTP 408, HTTP 429, and 5xx responses are retryable; other HTTP failures are
   treated as permanent.
@@ -248,9 +272,10 @@ separates it from potential future work.
   handlers, renders escaped HTML error pages.
 - Ingestion performs storage, issue update, and outbox insertion synchronously in
   one request transaction. There is no admission queue or backpressure metric.
-- Events are grouped and displayed as received. There is no Linux ELF/DWARF
-  symbolication, debug-symbol lookup, JavaScript source-map resolution, or stack
-  frame enrichment.
+- Events are grouped and displayed as received. Stack frames are rendered and
+  browsed as sent, but there is no Linux ELF/DWARF
+  symbolication, debug-symbol lookup, JavaScript source-map resolution, or
+  server-side frame enrichment beyond `in_app` classification.
 - `raw_events` and `events` both retain event content, increasing storage use.
 
 ### UI And Administration

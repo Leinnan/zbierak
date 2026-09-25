@@ -173,6 +173,10 @@ fn api_router() -> Router<AppState> {
             get(handlers::get_issue),
         )
         .route(
+            "/projects/{slug}/issues/{issue_id}/events",
+            get(handlers::list_issue_events),
+        )
+        .route(
             "/projects/{slug}/issues/{issue_id}/tags",
             put(handlers::update_issue_tags).layer(DefaultBodyLimit::max(FORM_BODY_LIMIT)),
         )

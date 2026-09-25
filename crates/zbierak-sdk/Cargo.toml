@@ -6,17 +6,22 @@ license = "MIT"
 description = "Runtime-independent Rust SDK for Zbierak"
 
 [features]
-default = ["blocking"]
+default = ["blocking", "stacktraces"]
 # Synchronous client backed by an OS sender thread.
 blocking = ["reqwest/blocking"]
+# Capture stack frames for panics and captured errors through the `backtrace`
+# crate. Disabling removes symbol resolution work and the dependency.
+stacktraces = ["dep:backtrace"]
 # Asynchronous client backed by a spawned Tokio task.
 async = ["dep:tokio"]
 # Bevy integration: captures Bevy log events through `LogPlugin` and
 # provides wiring helpers (`bevy_log::LogPlugin::custom_layer`,
 # [`crate::bevy::ZbierakPlugin`]). Requires `blocking` or `async`.
 bevy = ["dep:bevy_app", "dep:bevy_ecs", "dep:bevy_log"]
+backtrace = ["dep:backtrace"]
 
 [dependencies]
+backtrace = { version = "0.3.76", optional = true }
 bevy_app = { version = "0.19", optional = true }
 bevy_ecs = { version = "0.19", optional = true }
 bevy_log = { version = "0.19", optional = true }

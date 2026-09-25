@@ -13,7 +13,7 @@ use zbierak_protocol::{Breadcrumb, Event, Severity};
 
 use crate::{
     BreadcrumbLayer, BuildError, CaptureContext, CaptureError, Delivery, FlushError, FlushReport,
-    Spool, is_retryable, lock, panic_hook_message, push_breadcrumb,
+    Spool, error_event, is_retryable, lock, panic_event, push_breadcrumb,
 };
 
 /// Configures and constructs a [`Client`].
@@ -261,9 +261,28 @@ impl Client {
         let previous = panic::take_hook();
         let client = self.clone();
         panic::set_hook(Box::new(move |info| {
-            let _ = client.capture_message(panic_hook_message(info), Severity::Fatal);
+            let _ = client.capture_event(panic_event(info));
             previous(info);
         }));
+    }
+
+    /// Captures an error value with its cause chain and the current stack
+    /// frames, and returns its stable event ID.
+    ///
+    /// The error text becomes the event message, the concrete type and stack
+    /// fill [`ErrorInfo`], and `source()` causes land in the `error_chain`
+    /// context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`CaptureError`] under the same conditions as
+    /// [`Client::capture_event`].
+    pub fn capture_error<E: std::error::Error + 'static>(
+        &self,
+        error: &E,
+        severity: Severity,
+    ) -> Result<String, CaptureError> {
+        self.capture_event(error_event(error, severity))
     }
 
     /// Waits for queued events and retryable spooled events up to `timeout`.
