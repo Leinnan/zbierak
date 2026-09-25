@@ -58,29 +58,16 @@
     });
   }
 
-  // Toolbar actions that stay available; icons are rendered from CSS glyph
-  // classes so no Font Awesome download is attempted (the CSP allows
-  // same-origin resources only).
+  // Toolbar actions that stay available. The vendored EasyMDE build ignores
+  // its iconClassMap option, so the toolbar glyphs are drawn by CSS from the
+  // Font Awesome classes the editor emits; no FA download is attempted (the
+  // CSP allows same-origin resources only).
   var EDITOR_TOOLBAR = [
     "bold", "italic", "strikethrough", "|",
     "heading", "code", "quote", "|",
     "unordered-list", "ordered-list", "|",
     "link", "|", "preview", "side-by-side", "fullscreen"
   ];
-  var EDITOR_ICONS = {
-    bold: "zb-icon-bold",
-    italic: "zb-icon-italic",
-    strikethrough: "zb-icon-strike",
-    heading: "zb-icon-heading",
-    code: "zb-icon-code",
-    quote: "zb-icon-quote",
-    "unordered-list": "zb-icon-ul",
-    "ordered-list": "zb-icon-ol",
-    link: "zb-icon-link",
-    preview: "zb-icon-preview",
-    "side-by-side": "zb-icon-side",
-    fullscreen: "zb-icon-full"
-  };
 
   // The editor's live preview runs in the browser, one step removed from the
   // server-side sanitizer, so strip the obvious vectors there as well.
@@ -107,10 +94,6 @@
     if (!window.EasyMDE) return;
     root.querySelectorAll("textarea[data-markdown-editor]:not([data-prepared])").forEach(function (textarea) {
       textarea.dataset.prepared = "true";
-      var iconMap = {};
-      Object.keys(EDITOR_ICONS).forEach(function (name) {
-        iconMap[name] = "zb-icon " + EDITOR_ICONS[name];
-      });
       try {
         new window.EasyMDE({
           element: textarea,
@@ -121,7 +104,6 @@
           placeholder: textarea.getAttribute("placeholder") || "",
           status: ["lines", "words"],
           toolbar: EDITOR_TOOLBAR,
-          iconClassMap: iconMap,
           renderingConfig: { sanitizerFunction: stripPreviewHtml }
         });
       } catch (_) {

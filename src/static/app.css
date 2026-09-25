@@ -42,7 +42,7 @@
 [data-bs-theme="dark"] {
   --zb-ink: #e4ebe7;
   --zb-muted: #9aa79f;
-  --zb-paper: #0f1612;
+  --zb-paper: #121a15;
   --zb-panel: #17201c;
   --zb-line: #303c35;
   --zb-accent: #60c99d;
@@ -51,7 +51,7 @@
   --zb-button-hover: #2d926c;
   --zb-critical: #e16d70;
   --zb-warning: #d7a74f;
-  --zb-sidebar: #0a1510;
+  --zb-sidebar: #070d0a;
   --zb-soft: #1b2621;
   --zb-neutral-soft: #222d27;
   --zb-accent-soft: #173b2d;
@@ -63,7 +63,7 @@
   --zb-danger-line: #623b3e;
   --zb-warning-soft: #463719;
   --zb-info-soft: #18354a;
-  --zb-mobile-bar: rgba(15, 22, 18, .95);
+  --zb-mobile-bar: rgba(18, 26, 21, .95);
   --zb-setup-start: #101a15;
   --zb-setup-end: #0c120f;
   --zb-card-shadow: rgba(0, 0, 0, .18);
@@ -84,15 +84,16 @@ a { color: var(--zb-accent); }
 code, pre, .tabular-nums { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
 .btn-primary { --tblr-btn-bg: var(--zb-button); --tblr-btn-border-color: var(--zb-button); --tblr-btn-hover-bg: var(--zb-button-hover); --tblr-btn-hover-border-color: var(--zb-button-hover); }
 .card { border-color: var(--zb-line); box-shadow: 0 1px 2px var(--zb-card-shadow); }
-.skip-link { position: fixed; left: 1rem; top: -4rem; z-index: 1100; padding: .65rem 1rem; color: #fff; background: var(--zb-ink); border-radius: .4rem; }
+.skip-link { position: fixed; left: 1rem; top: -4rem; z-index: 1100; padding: .65rem 1rem; color: #fff; background: var(--zb-button); border-radius: .4rem; }
 .skip-link:focus { top: 1rem; }
+.btn-icon svg { display: block; }
 .app-shell { min-height: 100vh; display: grid; grid-template-columns: 248px minmax(0, 1fr); }
-.app-sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; padding: 1.25rem 1rem; color: #dce7e1; background: var(--zb-sidebar); z-index: 1030; }
+.app-sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column; padding: 1.25rem 1rem; color: #dce7e1; background: var(--zb-sidebar); border-right: 1px solid var(--zb-line); z-index: 1030; }
 .brand { display: inline-flex; align-items: center; gap: .7rem; font-size: 1.05rem; font-weight: 700; letter-spacing: -.02em; color: inherit; text-decoration: none; }
 .brand:hover { color: inherit; }
 .brand-mark { display: inline-grid; place-items: center; width: 2rem; height: 2rem; border: 1px solid rgba(255,255,255,.35); border-radius: .5rem; color: #fff; background: var(--zb-accent); font-size: .88rem; }
 .app-nav { margin-top: 3rem; display: grid; gap: .35rem; }
-.app-nav a { display: flex; align-items: center; gap: .75rem; padding: .7rem .75rem; border-radius: .5rem; color: #adbbb4; text-decoration: none; font-weight: 600; }
+.app-nav a { display: flex; align-items: center; gap: .75rem; padding: .7rem .75rem; border-radius: .5rem; color: #b8c5be; text-decoration: none; font-weight: 600; }
 .app-nav a:hover, .app-nav a[aria-current="page"] { color: #fff; background: rgba(255,255,255,.09); }
 .nav-glyph { font: 600 .65rem/1 ui-monospace, monospace; color: #6fa88e; }
 .sidebar-foot { margin-top: auto; display: grid; gap: 1rem; }
@@ -292,8 +293,8 @@ a.tag-chip:hover { border-color: var(--zb-accent); color: var(--zb-accent-dark);
 .comment-body li > p { margin: .2rem 0; }
 .comment-body blockquote { margin: .55rem 0; padding: .2rem .9rem; border-left: 3px solid var(--zb-accent); color: var(--zb-muted); }
 .comment-body blockquote p { margin: .3rem 0; }
-.comment-body code { padding: .1rem .35rem; border-radius: .3rem; background: var(--zb-neutral-soft); font-size: .82em; }
-.comment-body pre { margin: .55rem 0; padding: .7rem .9rem; overflow-x: auto; border: 1px solid var(--zb-line); border-radius: .4rem; background: var(--zb-soft); }
+.comment-body code { padding: .1rem .35rem; border-radius: .3rem; color: var(--zb-ink); background: var(--zb-neutral-soft); font-size: .82em; }
+.comment-body pre { margin: .55rem 0; padding: .7rem .9rem; overflow-x: auto; border: 1px solid var(--zb-line); border-radius: .4rem; color: var(--zb-ink); background: var(--zb-soft); }
 .comment-body pre code { padding: 0; background: transparent; font-size: .8rem; }
 .comment-body table { display: block; max-width: 100%; margin: .55rem 0; overflow-x: auto; border-collapse: collapse; font-size: .8rem; }
 .comment-body th, .comment-body td { padding: .35rem .6rem; border: 1px solid var(--zb-line); text-align: left; }
@@ -327,35 +328,55 @@ a.tag-chip:hover { border-color: var(--zb-accent); color: var(--zb-accent-dark);
 .EasyMDEContainer .editor-preview, .EasyMDEContainer .editor-preview-side { background: var(--zb-panel); color: var(--zb-ink); border-color: var(--zb-line); }
 .EasyMDEContainer .editor-preview :first-child, .EasyMDEContainer .editor-preview-side :first-child { margin-top: 0; }
 .EasyMDEContainer .CodeMirror-selected { background: var(--zb-accent-soft); }
+.EasyMDEContainer .CodeMirror-focused .CodeMirror-selected { background: var(--zb-accent-soft); }
+.EasyMDEContainer .CodeMirror-line::selection, .EasyMDEContainer .CodeMirror-line > span::selection, .EasyMDEContainer .CodeMirror-line > span > span::selection { background: var(--zb-accent-soft); }
+.EasyMDEContainer .CodeMirror-line::-moz-selection, .EasyMDEContainer .CodeMirror-line > span::-moz-selection, .EasyMDEContainer .CodeMirror-line > span > span::-moz-selection { background: var(--zb-accent-soft); }
 
-/* Toolbar glyphs: plain-text stand-ins so no Font Awesome download is
-   attempted; every action keeps its title tooltip. */
-.EasyMDEContainer .zb-icon { display: inline-block; min-width: 1.25em; font-style: normal; text-align: center; }
-.EasyMDEContainer .zb-icon-bold::before { content: "B"; }
-.EasyMDEContainer .zb-icon-italic::before { content: "I"; font-style: italic; }
-.EasyMDEContainer .zb-icon-strike::before { content: "S"; text-decoration: line-through; }
-.EasyMDEContainer .zb-icon-heading::before { content: "H"; }
-.EasyMDEContainer .zb-icon-code::before { content: "{\00a0}"; font-weight: 400; }
-.EasyMDEContainer .zb-icon-quote::before { content: "\201C"; }
-.EasyMDEContainer .zb-icon-ul::before { content: "\2261"; }
-.EasyMDEContainer .zb-icon-ol::before { content: "1."; font-weight: 400; }
-.EasyMDEContainer .zb-icon-link::before { content: "\2197"; }
-.EasyMDEContainer .zb-icon-preview::before { content: "\25C9"; }
-.EasyMDEContainer .zb-icon-side::before { content: "\25EB"; }
-.EasyMDEContainer .zb-icon-full::before { content: "\26F6"; }
+/* Light-theme token palette: replaces EasyMDE's fixed GitHub-style colors
+   with brand-aligned tones (dark theme has its own overrides below). */
+.EasyMDEContainer .cm-s-easymde .cm-string { color: var(--zb-accent-dark); }
+.EasyMDEContainer .cm-s-easymde .cm-tag { color: var(--zb-accent-dark); }
+.EasyMDEContainer .cm-s-easymde .cm-attribute { color: var(--zb-muted); }
+.EasyMDEContainer .cm-s-easymde .cm-link { color: var(--zb-accent); }
+.EasyMDEContainer .cm-s-easymde .cm-url { color: var(--zb-muted); }
+.EasyMDEContainer .cm-s-easymde .cm-quote { color: var(--zb-muted); }
+.EasyMDEContainer .cm-s-easymde .cm-comment { background: var(--zb-neutral-soft); }
+
+/* Toolbar glyphs: the vendored EasyMDE emits Font Awesome classes on its
+   toolbar icons, but the FA stylesheet is not bundled (same-origin CSP),
+   so plain-text stand-ins are drawn via CSS; every action keeps its
+   title tooltip. */
+.EasyMDEContainer .editor-toolbar .fa { display: inline-block; min-width: 1.25em; font-style: normal; text-align: center; }
+.EasyMDEContainer .editor-toolbar .fa-bold::before { content: "B"; }
+.EasyMDEContainer .editor-toolbar .fa-italic::before { content: "I"; font-style: italic; }
+.EasyMDEContainer .editor-toolbar .fa-strikethrough::before { content: "S"; text-decoration: line-through; }
+.EasyMDEContainer .editor-toolbar .fa-header::before { content: "H"; }
+.EasyMDEContainer .editor-toolbar .fa-code::before { content: "{\00a0}"; font-weight: 400; }
+.EasyMDEContainer .editor-toolbar .fa-quote-left::before { content: "\201C"; }
+.EasyMDEContainer .editor-toolbar .fa-list-ul::before { content: "\2261"; }
+.EasyMDEContainer .editor-toolbar .fa-list-ol::before { content: "1."; font-weight: 400; }
+.EasyMDEContainer .editor-toolbar .fa-link::before { content: "\2197"; }
+.EasyMDEContainer .editor-toolbar .fa-eye::before { content: "\25C9"; }
+.EasyMDEContainer .editor-toolbar .fa-columns::before { content: "\25EB"; }
+.EasyMDEContainer .editor-toolbar .fa-arrows-alt::before { content: "\26F6"; }
 
 /* Preview typography mirrors rendered comment bodies. */
 .EasyMDEContainer .editor-preview h1, .EasyMDEContainer .editor-preview-side h1 { font-size: 1.25rem; }
 .EasyMDEContainer .editor-preview h2, .EasyMDEContainer .editor-preview-side h2 { font-size: 1.12rem; }
 .EasyMDEContainer .editor-preview h3, .EasyMDEContainer .editor-preview-side h3 { font-size: 1rem; }
-.EasyMDEContainer .editor-preview code, .EasyMDEContainer .editor-preview-side code { padding: .1rem .35rem; border-radius: .3rem; background: var(--zb-neutral-soft); font-size: .82em; }
-.EasyMDEContainer .editor-preview pre, .EasyMDEContainer .editor-preview-side pre { padding: .7rem .9rem; overflow-x: auto; border: 1px solid var(--zb-line); border-radius: .4rem; background: var(--zb-soft); }
+.EasyMDEContainer .editor-preview code, .EasyMDEContainer .editor-preview-side code { padding: .1rem .35rem; border-radius: .3rem; color: var(--zb-ink); background: var(--zb-neutral-soft); font-size: .82em; }
+.EasyMDEContainer .editor-preview pre, .EasyMDEContainer .editor-preview-side pre { padding: .7rem .9rem; overflow-x: auto; border: 1px solid var(--zb-line); border-radius: .4rem; color: var(--zb-ink); background: var(--zb-soft); }
 .EasyMDEContainer .editor-preview blockquote, .EasyMDEContainer .editor-preview-side blockquote { padding: .2rem .9rem; border-left: 3px solid var(--zb-accent); color: var(--zb-muted); }
 .EasyMDEContainer .editor-preview table, .EasyMDEContainer .editor-preview-side table { border-collapse: collapse; font-size: .8rem; }
 .EasyMDEContainer .editor-preview th, .EasyMDEContainer .editor-preview td, .EasyMDEContainer .editor-preview-side th, .EasyMDEContainer .editor-preview-side td { padding: .35rem .6rem; border: 1px solid var(--zb-line); }
 .EasyMDEContainer .editor-preview img, .EasyMDEContainer .editor-preview-side img { max-width: 100%; }
 
-[data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-scrollbar-filler { background-color: var(--zb-panel); }
+[data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-scrollbar-filler, [data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-gutter-filler { background-color: var(--zb-panel); }
+[data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-fullscreen { background: var(--zb-panel); }
+[data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-selected, [data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-focused .CodeMirror-selected { background: rgba(96, 201, 157, .22); }
+[data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-line::selection, [data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-line > span::selection, [data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-line > span > span::selection { background: rgba(96, 201, 157, .22); }
+[data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-line::-moz-selection, [data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-line > span::-moz-selection, [data-bs-theme="dark"] .EasyMDEContainer .CodeMirror-line > span > span::-moz-selection { background: rgba(96, 201, 157, .22); }
+[data-bs-theme="dark"] .EasyMDEContainer .cm-searching { background: rgba(96, 201, 157, .3); }
 [data-bs-theme="dark"] .EasyMDEContainer .editor-toolbar.fullscreen { background: var(--zb-panel); }
 [data-bs-theme="dark"] .EasyMDEContainer .editor-toolbar.fullscreen::before, [data-bs-theme="dark"] .EasyMDEContainer .editor-toolbar.fullscreen::after { background: transparent; }
 [data-bs-theme="dark"] .EasyMDEContainer span.cm-header { color: var(--zb-accent); }

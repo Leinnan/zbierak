@@ -8,8 +8,8 @@
   <title>{% block title %}{{ title | default(value="Dashboard") }} · {{ app_name | default(value="Zbierak") }}{% endblock title %}</title>
   <script src="/static/theme-init.js"></script>
   <link rel="stylesheet" href="/static/vendor/tabler/tabler.min.css">
-  <link rel="stylesheet" href="/static/app.css?v=3">
   {% block head %}{% endblock head %}
+  <link rel="stylesheet" href="/static/app.css?v=5">
 </head>
 <body class="{{ body_class | default(value="") }}">
 {% block body %}
@@ -42,7 +42,7 @@
     <div class="app-main">
       <header class="mobile-bar">
         <a class="brand" href="/projects"><span class="brand-mark" aria-hidden="true">Z</span>{{ app_name | default(value="Zbierak") }}</a>
-        <button class="btn btn-outline-secondary btn-icon" type="button" data-sidebar-toggle aria-controls="app-sidebar" aria-expanded="false"><span class="menu-lines" aria-hidden="true"></span><span class="visually-hidden">Toggle navigation</span></button>
+        <button class="btn btn-outline-secondary btn-icon" type="button" data-sidebar-toggle aria-controls="app-sidebar" aria-expanded="false"><svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg><span class="visually-hidden">Toggle navigation</span></button>
       </header>
       <main id="main-content" class="page-body" tabindex="-1">
         <div class="container-xl">
@@ -55,7 +55,7 @@
 {% endblock body %}
 <script src="/static/vendor/htmx/htmx.min.js" defer></script>
 <script src="/static/vendor/tabler/tabler.min.js" defer></script>
-<script src="/static/app.js?v=3" defer></script>
+<script src="/static/app.js?v=4" defer></script>
 {% block scripts %}{% endblock scripts %}
 </body>
 </html>
