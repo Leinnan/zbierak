@@ -7,38 +7,59 @@
 //!
 //! Two runtimes are supported, selected by Cargo feature:
 //!
-//! * `blocking` (enabled by default): [`Client`] sends on a dedicated OS thread.
-//! * `async`: [`AsyncClient`] sends on a spawned Tokio task; capture stays synchronous,
+//! * `blocking` (enabled by default): `Client` sends on a dedicated OS thread.
+//! * `async`: `AsyncClient` sends on a spawned Tokio task; capture stays synchronous,
 //!   while `flush` and `shutdown` are awaited.
 //!
 //! With the `bevy` feature the crate additionally exposes a Bevy integration
-//! in the [`bevy`] module: it captures Bevy log events through `LogPlugin`,
+//! in the `bevy` module: it captures Bevy log events through `LogPlugin`,
 //! wires a drain system, and installs the panic hook from one call.
 //!
 //! The protocol types the API takes and returns are re-exported, so depending on this
 //! crate alone is enough to build and send events.
-//!
-//! # Example
-//!
-//! ```no_run
-//! use std::time::Duration;
-//!
-//! use zbierak_sdk::{Client, Severity};
-//!
-//! let client = Client::builder(
-//!     "https://errors.example.com/api/v1/projects/storefront/events",
-//! )
-//! .auth_token("zbk_REPLACE_WITH_PROJECT_KEY")
-//! .release("2026.09.24")
-//! .environment("production")
-//! .build()?;
-//!
-//! let event_id = client.capture_message("checkout failed", Severity::Error)?;
-//! println!("captured {event_id}");
-//! client.flush(Duration::from_secs(2))?;
-//! # Ok::<(), Box<dyn std::error::Error>>(())
-//! ```
-
+#![cfg_attr(
+    feature = "blocking",
+    doc = "# Example (blocking)",
+    doc = "",
+    doc = "```no_run",
+    doc = "use std::time::Duration;",
+    doc = "",
+    doc = "use zbierak_sdk::{Client, Severity};",
+    doc = "",
+    doc = "let client = Client::builder(",
+    doc = "    \"https://errors.example.com/api/v1/projects/storefront/events\",",
+    doc = ")",
+    doc = ".auth_token(\"zbk_REPLACE_WITH_PROJECT_KEY\")",
+    doc = ".release(\"2026.09.24\")",
+    doc = ".environment(\"production\")",
+    doc = ".build()?;",
+    doc = "",
+    doc = "let event_id = client.capture_message(\"checkout failed\", Severity::Error)?;",
+    doc = "println!(\"captured {event_id}\");",
+    doc = "client.flush(Duration::from_secs(2))?;",
+    doc = "# Ok::<(), Box<dyn std::error::Error>>(())",
+    doc = "```"
+)]
+#![cfg_attr(
+    feature = "async",
+    doc = "# Example (async)",
+    doc = "",
+    doc = "Capture is synchronous; only `flush` and `shutdown` are awaited.",
+    doc = "",
+    doc = "```no_run",
+    doc = "use zbierak_sdk::{AsyncClient, Severity};",
+    doc = "",
+    doc = "let client = AsyncClient::builder(",
+    doc = "    \"https://errors.example.com/api/v1/projects/storefront/events\",",
+    doc = ")",
+    doc = ".auth_token(\"zbk_REPLACE_WITH_PROJECT_KEY\")",
+    doc = ".build()?;",
+    doc = "",
+    doc = "let event_id = client.capture_message(\"checkout failed\", Severity::Error)?;",
+    doc = "println!(\"captured {event_id}\");",
+    doc = "# Ok::<(), Box<dyn std::error::Error>>(())",
+    doc = "```"
+)]
 #![forbid(unsafe_code)]
 // With no client feature selected the crate only exposes shared machinery.
 #![cfg_attr(not(any(feature = "blocking", feature = "async")), allow(dead_code))]
