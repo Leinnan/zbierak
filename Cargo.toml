@@ -12,12 +12,13 @@ members = ["crates/*"]
 [dependencies]
 ammonia = "4.2.0"
 argon2 = "0.5"
-axum = { version = "0.8", features = ["form", "json"] }
+axum = { version = "0.8", features = ["form", "json", "multipart"] }
 base64 = "0.22"
 blake3 = "1"
 chacha20poly1305 = "0.11.0"
 dotenvy = "0.15"
 hmac = "0.12"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 pulldown-cmark = "0.13.4"
 rand = "0.8"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
@@ -41,6 +42,7 @@ zbierak-protocol = { path = "crates/zbierak-protocol" }
 
 [dev-dependencies]
 http-body-util = "0.1"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp"] }
 tower = { version = "0.5", features = ["util"] }
 
 # Workspace-wide lint policy, inherited by every member through

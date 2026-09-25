@@ -1,3 +1,4 @@
+{% import "fragments/ui.html" as ui %}
 <!doctype html>
 <html lang="{{ lang | default(value="en") }}">
 <head>
@@ -9,7 +10,7 @@
   <script src="/static/theme-init.js"></script>
   <link rel="stylesheet" href="/static/vendor/tabler/tabler.min.css">
   {% block head %}{% endblock head %}
-  <link rel="stylesheet" href="/static/app.css?v=5">
+  <link rel="stylesheet" href="/static/app.css?v=6">
 </head>
 <body class="{{ body_class | default(value="") }}">
 {% block body %}
@@ -30,7 +31,7 @@
       </nav>
       <div class="sidebar-foot">
         <div class="user-summary">
-          <span class="avatar avatar-sm">{{ user.display_name | default(value="A") | truncate(length=1, end="") | upper }}</span>
+          {% if user.avatar %}{{ ui::avatar(name=user.display_name, avatar_url=user.avatar.url, user_id=user.id) }}{% else %}{{ ui::avatar(name=user.display_name, user_id=user.id) }}{% endif %}
           <span><strong>{{ user.display_name | default(value="Administrator") }}</strong><small>{{ user.email | default(value="") }}</small></span>
         </div>
         <form method="post" action="/logout">

@@ -5,7 +5,7 @@ use axum::{
     Json,
     body::Body,
     extract::{Path as AxumPath, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderMap, StatusCode, header},
     response::{Html, IntoResponse, Redirect, Response},
 };
 use serde::{Deserialize, Serialize};
@@ -22,9 +22,11 @@ use crate::{
     api_error::ApiError,
     audit,
     auth::{self, User},
+    avatars,
     domain::{IssueStatus, ProjectRole},
     extractors::{
-        ApiEventBody, ApiJson, ApiPath, ApiPrincipal, ApiQuery, IngestProject, UiForm, UiSession,
+        ApiEventBody, ApiJson, ApiPath, ApiPrincipal, ApiQuery, IngestProject, UiForm, UiMultipart,
+        UiSession,
     },
     fingerprint::event_fingerprint,
 };
@@ -116,6 +118,12 @@ pub struct TagsForm {
 }
 
 #[derive(Deserialize)]
+pub struct ProfileForm {
+    csrf_token: String,
+    display_name: String,
+}
+
+#[derive(Deserialize)]
 pub struct ProjectQuery {
     /// Comma-separated tag filters; issues must carry every listed tag.
     tag: Option<String>,
@@ -189,6 +197,11 @@ struct CommentRow {
     /// Last accepted edit, if any.
     updated_at: Option<i64>,
     updated_by_name: Option<String>,
+    /// Avatar digest of the author, when one is uploaded.
+    avatar_sha256: Option<String>,
+    /// Same-origin avatar URL derived from `avatar_sha256` after loading.
+    #[sqlx(skip)]
+    avatar_url: Option<String>,
     /// Sanitized HTML rendered server-side from the Markdown body; empty
     /// for tombstones. Rendered after loading, never stored.
     #[sqlx(skip)]
@@ -211,6 +224,11 @@ struct MemberRow {
     email: String,
     display_name: String,
     role: String,
+    /// Avatar digest of the member, when one is uploaded.
+    avatar_sha256: Option<String>,
+    /// Same-origin avatar URL derived from `avatar_sha256` after loading.
+    #[sqlx(skip)]
+    avatar_url: Option<String>,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -552,13 +570,19 @@ async fn load_project_page(
         .bind(project_id)
         .fetch_all(&state.db)
         .await?;
-        let members = sqlx::query_as::<_, MemberRow>(
-            "SELECT u.id, u.email, u.display_name, m.role FROM project_memberships m
-             JOIN users u ON u.id=m.user_id WHERE m.project_id=? ORDER BY u.display_name",
+        let mut members = sqlx::query_as::<_, MemberRow>(
+            "SELECT u.id, u.email, u.display_name, m.role, av.sha256 AS avatar_sha256
+             FROM project_memberships m
+             JOIN users u ON u.id=m.user_id
+             LEFT JOIN user_avatars av ON av.user_id=u.id
+             WHERE m.project_id=? ORDER BY u.display_name",
         )
         .bind(project_id)
         .fetch_all(&state.db)
         .await?;
+        for member in &mut members {
+            member.avatar_url = avatar_url(member.id, member.avatar_sha256.as_deref());
+        }
         (keys, endpoints, members)
     } else {
         (Vec::new(), Vec::new(), Vec::new())
@@ -794,10 +818,11 @@ async fn load_issue_details(
         .collect();
     let mut comments = sqlx::query_as::<_, CommentRow>(
         "SELECT c.id, c.body, c.user_id, c.created_at, c.deleted_at, c.updated_at,
-                u.display_name, ub.display_name AS updated_by_name
+                u.display_name, ub.display_name AS updated_by_name, av.sha256 AS avatar_sha256
          FROM issue_comments c
          JOIN users u ON u.id=c.user_id
          LEFT JOIN users ub ON ub.id=c.updated_by
+         LEFT JOIN user_avatars av ON av.user_id=c.user_id
          WHERE c.issue_id=? ORDER BY c.created_at, c.id",
     )
     .bind(issue_id)
@@ -806,6 +831,7 @@ async fn load_issue_details(
     // Rendering and sanitization happen on the server so templates can embed
     // the result with autoescaping disabled; tombstones stay unrendered.
     for comment in &mut comments {
+        comment.avatar_url = avatar_url(comment.user_id, comment.avatar_sha256.as_deref());
         comment.body_html = if comment.deleted_at.is_some() {
             String::new()
         } else {
@@ -1424,6 +1450,23 @@ async fn settings_context(
     Ok(context)
 }
 
+/// Re-renders the settings page with a flash banner after a profile mutation.
+async fn settings_flash_response(
+    state: &AppState,
+    session: &auth::Session,
+    cookies: &Cookies,
+    message: &str,
+    kind: &str,
+) -> AppResult<Html<String>> {
+    let current_hash = cookies
+        .get(auth::SESSION_COOKIE)
+        .map(|cookie| auth::token_hash(cookie.value()));
+    let mut context = settings_context(state, session, current_hash).await?;
+    context.insert("flash_message", message);
+    context.insert("flash_type", kind);
+    render(state, "settings.html", &context)
+}
+
 pub async fn settings(
     State(state): State<AppState>,
     UiSession { session, cookies }: UiSession,
@@ -1541,6 +1584,114 @@ pub async fn change_password(
     .await?;
     tx.commit().await?;
     Ok(Redirect::to("/settings"))
+}
+
+pub async fn update_profile(
+    State(state): State<AppState>,
+    UiSession {
+        mut session,
+        cookies,
+    }: UiSession,
+    UiForm(form): UiForm<ProfileForm>,
+) -> AppResult<Html<String>> {
+    auth::check_csrf(&session, &form.csrf_token)?;
+    let display_name = required_text("display name", &form.display_name, 100)?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query("UPDATE users SET display_name=? WHERE id=?")
+        .bind(display_name)
+        .bind(session.user.id)
+        .execute(&mut *tx)
+        .await?;
+    audit::record(
+        &mut *tx,
+        Some(session.user.id),
+        "user.updated",
+        Some("user"),
+        Some(session.user.id.to_string()),
+        json!({ "field": "display_name" }),
+    )
+    .await?;
+    tx.commit().await?;
+    // Reflect the new name in the response without another database read.
+    session.user.display_name = display_name.to_owned();
+    settings_flash_response(&state, &session, &cookies, "Profile updated.", "success").await
+}
+
+pub async fn upload_avatar(
+    State(state): State<AppState>,
+    UiSession {
+        mut session,
+        cookies,
+    }: UiSession,
+    UiMultipart {
+        csrf_token, bytes, ..
+    }: UiMultipart,
+) -> AppResult<Html<String>> {
+    auth::check_csrf(&session, &csrf_token)?;
+    let png = avatars::normalize_upload(&bytes)?;
+    let sha256 = auth::sha256_hex(&png);
+    let byte_size = i64::try_from(png.len())
+        .map_err(|_| AppError::PayloadTooLarge("avatar image is too large".into()))?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query(
+        "INSERT INTO user_avatars (user_id, content_type, byte_size, sha256, bytes, updated_at)
+         VALUES (?, 'image/png', ?, ?, ?, unixepoch())
+         ON CONFLICT(user_id) DO UPDATE SET
+             content_type=excluded.content_type,
+             byte_size=excluded.byte_size,
+             sha256=excluded.sha256,
+             bytes=excluded.bytes,
+             updated_at=excluded.updated_at",
+    )
+    .bind(session.user.id)
+    .bind(byte_size)
+    .bind(&sha256)
+    .bind(&png)
+    .execute(&mut *tx)
+    .await?;
+    audit::record(
+        &mut *tx,
+        Some(session.user.id),
+        "avatar.updated",
+        Some("user"),
+        Some(session.user.id.to_string()),
+        json!({ "bytes": byte_size }),
+    )
+    .await?;
+    tx.commit().await?;
+    session.user.avatar = Some(auth::AvatarRef {
+        url: format!("/users/{}/avatar?v={}", session.user.id, &sha256[..16]),
+        version: sha256,
+    });
+    settings_flash_response(&state, &session, &cookies, "Avatar updated.", "success").await
+}
+
+pub async fn delete_avatar(
+    State(state): State<AppState>,
+    UiSession {
+        mut session,
+        cookies,
+    }: UiSession,
+    UiForm(form): UiForm<CsrfForm>,
+) -> AppResult<Html<String>> {
+    auth::check_csrf(&session, &form.csrf_token)?;
+    let mut tx = state.db.begin().await?;
+    sqlx::query("DELETE FROM user_avatars WHERE user_id=?")
+        .bind(session.user.id)
+        .execute(&mut *tx)
+        .await?;
+    audit::record(
+        &mut *tx,
+        Some(session.user.id),
+        "avatar.removed",
+        Some("user"),
+        Some(session.user.id.to_string()),
+        json!({}),
+    )
+    .await?;
+    tx.commit().await?;
+    session.user.avatar = None;
+    settings_flash_response(&state, &session, &cookies, "Avatar removed.", "success").await
 }
 
 pub async fn revoke_other_sessions(
@@ -2225,6 +2376,51 @@ pub async fn ready(State(state): State<AppState>) -> Result<&'static str, ApiErr
     Ok("ready")
 }
 
+/// Serves a stored avatar to any authenticated operator. Missing avatars
+/// return `404` so templates fall back to generated initials.
+pub async fn serve_avatar(
+    State(state): State<AppState>,
+    UiSession { .. }: UiSession,
+    AxumPath(user_id): AxumPath<i64>,
+    headers: HeaderMap,
+) -> AppResult<Response> {
+    let row = sqlx::query_as::<_, (String, String, Vec<u8>)>(
+        "SELECT content_type, sha256, bytes FROM user_avatars WHERE user_id=?",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    let Some((content_type, sha256, bytes)) = row else {
+        return Err(AppError::NotFound);
+    };
+    // Conditional requests: the digest is the entity tag, so a matching
+    // If-None-Match (weak or strong) short-circuits to `304`.
+    let not_modified = headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(',').any(|candidate| {
+                candidate.trim().trim_start_matches("W/").trim_matches('"') == sha256
+            })
+        });
+    if not_modified {
+        return Ok(StatusCode::NOT_MODIFIED.into_response());
+    }
+    let mut response = Response::new(Body::from(bytes));
+    let response_headers = response.headers_mut();
+    if let Ok(value) = header::HeaderValue::from_str(&content_type) {
+        response_headers.insert(header::CONTENT_TYPE, value);
+    }
+    if let Ok(value) = header::HeaderValue::from_str(&format!("\"{sha256}\"")) {
+        response_headers.insert(header::ETAG, value);
+    }
+    response_headers.insert(
+        header::CACHE_CONTROL,
+        header::HeaderValue::from_static("private, max-age=300"),
+    );
+    Ok(response)
+}
+
 pub async fn static_asset(
     State(state): State<AppState>,
     AxumPath(path): AxumPath<String>,
@@ -2271,6 +2467,17 @@ pub async fn static_asset(
         headers.insert(header::CACHE_CONTROL, value);
     }
     Ok(response)
+}
+
+/// Versioned, same-origin avatar URL for a user, or `None` when no avatar is
+/// stored (the template then falls back to generated initials).
+fn avatar_url(user_id: i64, sha256: Option<&str>) -> Option<String> {
+    sha256.map(|sha256| {
+        format!(
+            "/users/{user_id}/avatar?v={}",
+            &sha256[..sha256.len().min(16)]
+        )
+    })
 }
 
 fn page_context(user: &User, csrf: &str) -> Context {
@@ -2653,6 +2860,8 @@ mod tests {
                 deleted_at: None,
                 updated_at: None,
                 updated_by_name: None,
+                avatar_sha256: None,
+                avatar_url: None,
                 body_html: String::new(),
             }],
             activity: vec![ActivityRow {
@@ -2740,6 +2949,8 @@ mod tests {
                 deleted_at: Some(60),
                 updated_at: None,
                 updated_by_name: Some("Bob".into()),
+                avatar_sha256: None,
+                avatar_url: None,
                 body_html: String::new(),
             },
             CommentRow {
@@ -2751,6 +2962,8 @@ mod tests {
                 deleted_at: None,
                 updated_at: Some(180),
                 updated_by_name: Some("Bob".into()),
+                avatar_sha256: None,
+                avatar_url: None,
                 body_html: String::new(),
             },
         ];

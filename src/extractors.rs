@@ -12,12 +12,13 @@ use axum::{
     extract::{
         DefaultBodyLimit, FromRequest, FromRequestParts, Path as AxumPath, Query as AxumQuery,
         Request,
+        multipart::{Multipart, MultipartError, MultipartRejection},
         rejection::{
             BytesRejection, FailedToBufferBody, FormRejection, JsonRejection, PathRejection,
             QueryRejection,
         },
     },
-    http::{header::CONTENT_TYPE, request::Parts},
+    http::{StatusCode, header::CONTENT_TYPE, request::Parts},
 };
 use serde::de::DeserializeOwned;
 use tower_cookies::Cookies;
@@ -29,6 +30,10 @@ pub const EVENT_BODY_LIMIT: usize = 1_048_576;
 
 /// Maximum body size for operator UI forms and small management JSON payloads.
 pub const FORM_BODY_LIMIT: usize = 65_536;
+
+/// Maximum multipart body accepted by the avatar upload route: the image
+/// ceiling plus headroom for the CSRF field and multipart framing.
+pub const AVATAR_BODY_LIMIT: usize = crate::avatars::MAX_UPLOAD_BYTES + 262_144;
 
 /// `Path` extractor for API routes that rejects with the JSON error format.
 pub struct ApiPath<T>(pub T);
@@ -132,6 +137,69 @@ where
     }
 }
 
+/// Multipart form for operator UI routes (avatar upload) that rejects with the
+/// HTML error surface instead of Axum's plain-text rejections. Requires a
+/// `csrf_token` text field and an `avatar` file field.
+pub struct UiMultipart {
+    /// CSRF token carried as a sibling form field.
+    pub csrf_token: String,
+    /// Client-supplied filename, retained for messaging only, never stored.
+    pub file_name: Option<String>,
+    /// Raw uploaded image bytes; decoded and normalized by the handler.
+    pub bytes: Vec<u8>,
+}
+
+impl<S> FromRequest<S> for UiMultipart
+where
+    S: Send + Sync,
+{
+    type Rejection = AppError;
+
+    async fn from_request(req: Request, state: &S) -> Result<Self, Self::Rejection> {
+        let mut req = req;
+        DefaultBodyLimit::max(AVATAR_BODY_LIMIT).apply(&mut req);
+        let mut multipart = Multipart::from_request(req, state)
+            .await
+            .map_err(|rejection| multipart_rejection_error(&rejection))?;
+        let mut csrf_token = None;
+        let mut file_name = None;
+        let mut bytes = None;
+        while let Some(field) = multipart
+            .next_field()
+            .await
+            .map_err(|error| multipart_error(&error))?
+        {
+            match field.name() {
+                Some("csrf_token") => {
+                    csrf_token = Some(
+                        field
+                            .text()
+                            .await
+                            .map_err(|error| multipart_error(&error))?,
+                    );
+                }
+                Some("avatar") => {
+                    file_name = field.file_name().map(str::to_owned);
+                    bytes = Some(
+                        field
+                            .bytes()
+                            .await
+                            .map_err(|error| multipart_error(&error))?
+                            .to_vec(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        Ok(Self {
+            csrf_token: csrf_token
+                .ok_or_else(|| AppError::BadRequest("missing csrf token".into()))?,
+            file_name,
+            bytes: bytes.ok_or_else(|| AppError::BadRequest("missing avatar file".into()))?,
+        })
+    }
+}
+
 /// Authenticated operator session resolved before the request body is read.
 ///
 /// Carries the [`Cookies`] handle because several session lifecycle handlers
@@ -226,6 +294,18 @@ fn json_rejection_error(rejection: &JsonRejection) -> AppError {
         JsonRejection::BytesRejection(bytes) => body_rejection_error(bytes),
         _ => AppError::BadRequest("invalid JSON request body".into()),
     }
+}
+
+fn multipart_error(error: &MultipartError) -> AppError {
+    if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        AppError::PayloadTooLarge("avatar upload exceeds the allowed size".into())
+    } else {
+        AppError::BadRequest(error.body_text())
+    }
+}
+
+fn multipart_rejection_error(rejection: &MultipartRejection) -> AppError {
+    AppError::BadRequest(rejection.body_text())
 }
 
 fn body_rejection_error(rejection: &BytesRejection) -> AppError {

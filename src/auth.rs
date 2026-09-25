@@ -90,6 +90,18 @@ pub struct User {
     pub id: i64,
     pub email: String,
     pub display_name: String,
+    /// Uploaded avatar reference, or `None` to render generated initials.
+    #[sqlx(skip)]
+    pub avatar: Option<AvatarRef>,
+}
+
+/// Cache-busting handle for a stored avatar, exposed to templates.
+#[derive(Debug, Clone, Serialize)]
+pub struct AvatarRef {
+    /// Same-origin URL that serves the avatar bytes.
+    pub url: String,
+    /// Short content digest used to version the URL.
+    pub version: String,
 }
 
 #[derive(Debug, Clone)]
@@ -163,22 +175,30 @@ pub async fn session(state: &AppState, cookies: &Cookies) -> AppResult<Option<Se
         return Ok(None);
     };
     let hash = token_hash(cookie.value());
-    let row = sqlx::query_as::<_, (i64, String, String, String)>(
-        "SELECT u.id, u.email, u.display_name, s.csrf_token
-         FROM sessions s JOIN users u ON u.id = s.user_id
+    let row = sqlx::query_as::<_, (i64, String, String, String, Option<String>)>(
+        "SELECT u.id, u.email, u.display_name, s.csrf_token, a.sha256
+         FROM sessions s
+         JOIN users u ON u.id = s.user_id
+         LEFT JOIN user_avatars a ON a.user_id = u.id
          WHERE s.token_hash = ? AND s.expires_at > unixepoch()",
     )
     .bind(hash)
     .fetch_optional(&state.db)
     .await?;
-    Ok(row.map(|(id, email, display_name, csrf_token)| Session {
-        user: User {
-            id,
-            email,
-            display_name,
+    Ok(row.map(
+        |(id, email, display_name, csrf_token, avatar_sha256)| Session {
+            user: User {
+                id,
+                email,
+                display_name,
+                avatar: avatar_sha256.map(|sha256| AvatarRef {
+                    url: format!("/users/{id}/avatar?v={}", &sha256[..sha256.len().min(16)]),
+                    version: sha256,
+                }),
+            },
+            csrf_token,
         },
-        csrf_token,
-    }))
+    ))
 }
 
 pub async fn require_session(state: &AppState, cookies: &Cookies) -> AppResult<Session> {

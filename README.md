@@ -175,6 +175,16 @@ routes intentionally use a relaxed Content-Security-Policy and are
 unauthenticated, so keep them on loopback or behind a reverse proxy that
 restricts access in production.
 
+## Profile Settings
+
+Settings → Profile lets each user change their display name and upload an
+avatar. Uploads must be PNG, JPEG, or WebP, are validated by content (not
+filename), center-cropped and resized to 256×256, then stored as PNG in SQLite;
+SVG is rejected so avatar responses never serve active content. Avatars are
+served same-origin at `/users/{user_id}/avatar` with an `ETag`. Accounts without
+an upload render generated initials. The Docker image and `/data` volume backup
+already cover avatar storage, so no extra configuration is required.
+
 ## Issue Tags And The Management API
 
 Issues carry flat string tags (labels). Rules: trimmed, 1–64 characters, no

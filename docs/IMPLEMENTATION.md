@@ -41,6 +41,14 @@ separates it from potential future work.
 - Users can change their password from the settings page (which signs out all
   other sessions), list active sessions, revoke individual sessions, and sign
   out everywhere except the current browser.
+- Users can change their display name and upload a profile avatar from the
+  Settings profile card. Uploads are limited to PNG, JPEG, or WebP, decoded by
+  magic bytes, center-cropped and resized to 256×256, and re-encoded to PNG
+  before being stored as a BLOB in the `user_avatars` table (so no SVG or other
+  active content is ever served). Avatars are served same-origin at
+  `GET /users/{user_id}/avatar` with an `ETag` and private caching. Accounts
+  without an uploaded avatar render deterministic generated initials. Changing a
+  display name or avatar is recorded in the audit log.
 - Logins, failures, and every privileged mutation are recorded in an
   `audit_log` table.
 - Responses include a self-only Content Security Policy, MIME-sniffing

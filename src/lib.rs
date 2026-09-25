@@ -13,6 +13,7 @@
 mod api_error;
 mod audit;
 mod auth;
+mod avatars;
 mod config;
 mod db;
 mod domain;
@@ -126,7 +127,11 @@ fn ui_router() -> Router<AppState> {
             post(handlers::update_issue_tags_form),
         )
         .route("/settings", get(handlers::settings))
+        .route("/settings/profile", post(handlers::update_profile))
+        .route("/settings/avatar", post(handlers::upload_avatar))
+        .route("/settings/avatar/delete", post(handlers::delete_avatar))
         .route("/settings/password", post(handlers::change_password))
+        .route("/users/{user_id}/avatar", get(handlers::serve_avatar))
         .route(
             "/settings/sessions/revoke-others",
             post(handlers::revoke_other_sessions),

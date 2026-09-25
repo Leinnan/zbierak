@@ -5,8 +5,42 @@
 <header class="page-heading"><div><p class="eyebrow">Settings</p><h1>Settings</h1><p>Appearance, notification delivery, and account security.</p></div></header>
 
 <div class="settings-layout">
-  <nav class="settings-nav" aria-label="Settings sections"><a href="#appearance">Appearance</a><a href="#endpoints">Endpoints</a><a href="#add-endpoint">Add endpoint</a><a href="#api-tokens">API tokens</a><a href="#account">Account</a></nav>
+  <nav class="settings-nav" aria-label="Settings sections"><a href="#profile">Profile</a><a href="#appearance">Appearance</a><a href="#endpoints">Endpoints</a><a href="#add-endpoint">Add endpoint</a><a href="#api-tokens">API tokens</a><a href="#account">Account</a></nav>
   <div class="settings-content">
+    <section class="settings-section" id="profile" aria-labelledby="profile-title">
+      <div class="section-heading"><div><p class="eyebrow">Identity</p><h2 id="profile-title">Profile</h2></div></div>
+      <article class="card settings-card">
+        <div class="card-header"><div><h3 class="card-title">Display name and avatar</h3><p>Your name appears on comments and membership; your avatar shows across the operator UI.</p></div></div>
+        <div class="card-body">
+          <div class="d-flex align-items-center gap-3 mb-3">
+            {% if user.avatar %}{{ ui::avatar(name=user.display_name, avatar_url=user.avatar.url, user_id=user.id, size="lg") }}{% else %}{{ ui::avatar(name=user.display_name, user_id=user.id, size="lg") }}{% endif %}
+            <div><strong>{{ user.display_name }}</strong><div class="text-secondary">{{ user.email }}</div></div>
+          </div>
+          <form class="compact-form" method="post" action="/settings/avatar" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><label class="form-label" for="avatar-file">Avatar image</label><input class="form-control" id="avatar-file" name="avatar" type="file" accept="image/png,image/jpeg,image/webp" required><div class="form-hint">PNG, JPEG, or WebP, up to 2 MiB. Resized to 256×256.</div></div>
+            <button class="btn btn-primary" type="submit">Upload avatar</button>
+          </form>
+          {% if user.avatar %}
+          <form method="post" action="/settings/avatar/delete">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn-outline-danger" type="submit" data-confirm="Remove your avatar?">Remove avatar</button>
+          </form>
+          {% endif %}
+        </div>
+      </article>
+      <article class="card settings-card">
+        <div class="card-header"><div><h3 class="card-title">Display name</h3><p>Shown to other members and in the operator UI.</p></div></div>
+        <div class="card-body">
+          <form class="compact-form" method="post" action="/settings/profile">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><label class="form-label" for="profile-display-name">Display name</label><input class="form-control" id="profile-display-name" name="display_name" maxlength="100" value="{{ user.display_name }}" required></div>
+            <button class="btn btn-primary" type="submit">Save name</button>
+          </form>
+        </div>
+      </article>
+    </section>
+
     <section class="settings-section" id="appearance" aria-labelledby="appearance-title">
       <div class="section-heading"><div><p class="eyebrow">Display</p><h2 id="appearance-title">Appearance</h2></div></div>
       <article class="card settings-card">

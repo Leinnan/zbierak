@@ -23,3 +23,14 @@
 {% macro tag_chip(tag, href="") %}
 {% if href | default(value="") %}<a class="tag-chip" href="{{ href }}">{{ tag }}</a>{% else %}<span class="tag-chip">{{ tag }}</span>{% endif %}
 {% endmacro tag_chip %}
+
+{# Avatar: uploaded image when a URL is present, otherwise deterministic
+   initials. The generated tone is `user_id % 6` and must stay in range for
+   the `.avatar-tone-*` classes in app.css. #}
+{% macro avatar(name, avatar_url="", user_id=0, size="sm") %}
+{% if avatar_url | default(value="") %}
+<img class="avatar avatar-{{ size }}" src="{{ avatar_url }}" alt="" loading="lazy" decoding="async">
+{% else %}
+<span class="avatar avatar-{{ size }} avatar-generated avatar-tone-{{ user_id % 6 }}" aria-hidden="true">{{ name | default(value="?") | truncate(length=1, end="") | upper }}</span>
+{% endif %}
+{% endmacro avatar %}

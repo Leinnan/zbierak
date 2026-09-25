@@ -101,6 +101,15 @@ code, pre, .tabular-nums { font-family: ui-monospace, SFMono-Regular, Menlo, Mon
 .user-summary > span:last-child { min-width: 0; }
 .user-summary strong, .user-summary small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .user-summary small { color: #93a49b; font-size: .72rem; }
+.avatar { overflow: hidden; }
+img.avatar { object-fit: cover; }
+.avatar-generated { color: #fff; font-weight: 700; }
+.avatar-tone-0 { background: #176b4d; }
+.avatar-tone-1 { background: #245c82; }
+.avatar-tone-2 { background: #6b4b8a; }
+.avatar-tone-3 { background: #a72727; }
+.avatar-tone-4 { background: #9a5b00; }
+.avatar-tone-5 { background: #2f6f6a; }
 .mobile-bar { display: none; }
 .page-body { padding: 2.75rem 0 4rem; }
 .page-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 2rem; margin-bottom: 2rem; }

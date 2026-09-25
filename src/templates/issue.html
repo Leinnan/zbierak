@@ -45,7 +45,7 @@
       <div class="comment-list">
         {% for comment in comments | default(value=[]) %}
         <article class="card comment-card{% if comment.deleted_at %} is-removed{% endif %}">
-          <div class="comment-meta"><span class="avatar avatar-sm">{{ comment.display_name | truncate(length=1, end="") | upper }}</span><div><strong>{{ comment.display_name }}</strong><time class="js-local-time" data-unix="{{ comment.created_at }}">{{ comment.created_at }}</time>{% if comment.updated_at %}<span class="comment-edited">edited{% if comment.updated_by_name %} by {{ comment.updated_by_name }}{% endif %}</span>{% endif %}</div></div>
+          <div class="comment-meta">{% if comment.avatar_url %}{{ ui::avatar(name=comment.display_name, avatar_url=comment.avatar_url, user_id=comment.user_id) }}{% else %}{{ ui::avatar(name=comment.display_name, user_id=comment.user_id) }}{% endif %}<div><strong>{{ comment.display_name }}</strong><time class="js-local-time" data-unix="{{ comment.created_at }}">{{ comment.created_at }}</time>{% if comment.updated_at %}<span class="comment-edited">edited{% if comment.updated_by_name %} by {{ comment.updated_by_name }}{% endif %}</span>{% endif %}</div></div>
           {% if comment.deleted_at %}
           <p class="comment-removed">Comment removed.</p>
           {% else %}
