@@ -9,10 +9,17 @@ use zbierak_protocol::StackFrame;
 /// Maximum number of frames reported for one event.
 pub(crate) const MAX_FRAMES: usize = 128;
 
+/// Upper bound for one string field inside a frame, mirroring the protocol's
+/// ingestion limit so captured frames always validate instead of silently
+/// dropping the whole event.
+const MAX_FRAME_FIELD_BYTES: usize = 1_024;
+
 /// Captures the current call stack, oldest first, capped at [`MAX_FRAMES`].
 ///
 /// Frames belonging to the panic machinery and to this SDK are removed so the
-/// first reported frame is the application call site.
+/// first reported frame is the application call site. Field values are
+/// truncated to [`MAX_FRAME_FIELD_BYTES`] so a single verbose symbol cannot
+/// invalidate the event.
 pub(crate) fn capture_frames() -> Vec<StackFrame> {
     let backtrace = backtrace::Backtrace::new();
     let mut frames: Vec<StackFrame> = backtrace
@@ -31,12 +38,32 @@ pub(crate) fn capture_frames() -> Vec<StackFrame> {
     }
     frames.retain(|frame| !frame.function.as_deref().is_some_and(is_internal_frame));
     frames.truncate(MAX_FRAMES);
+    for frame in &mut frames {
+        truncate_frame_fields(frame);
+    }
     frames
 }
 
-/// True for frames that belong to the Rust runtime, this SDK, or the
-/// stack-capture machinery rather than application code. Matched on demangled
-/// paths to stay independent of optimization-level-dependent inlining.
+/// Trims a frame field to [`MAX_FRAME_FIELD_BYTES`] without splitting a UTF-8
+/// code point.
+fn truncate_frame_fields(frame: &mut StackFrame) {
+    for field in [&mut frame.function, &mut frame.filename, &mut frame.module] {
+        if let Some(text) = field.as_mut()
+            && text.len() > MAX_FRAME_FIELD_BYTES
+        {
+            let mut end = MAX_FRAME_FIELD_BYTES;
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            text.truncate(end);
+        }
+    }
+}
+
+/// True for frames that belong to the Rust runtime, this SDK, the
+/// stack-capture machinery, or the `tracing` dispatch stack rather than
+/// application code. Matched on demangled paths to stay independent of
+/// optimization-level-dependent inlining.
 fn is_internal_frame(function: &str) -> bool {
     // v0-mangled generics demangle with leading `<...>`; look past them so
     // `<backtrace[hash]::capture::Backtrace>::new` is still recognized.
@@ -52,6 +79,16 @@ fn is_internal_frame(function: &str) -> bool {
         // Scoped to avoid swallowing unrelated crates like `object_store`.
         || function.starts_with("object[")
         || function.starts_with("object::")
+        // The macro-to-layer dispatch path above the `error!`/`panic!` call
+        // site. The `::` keeps lookalike crates such as `tracing_appender`
+        // visible, and the bracketed form covers v0-mangled names like
+        // `tracing_core[hash]::dispatcher::get_default`.
+        || function.starts_with("tracing::")
+        || function.starts_with("tracing[")
+        || function.starts_with("tracing_core::")
+        || function.starts_with("tracing_core[")
+        || function.starts_with("tracing_subscriber::")
+        || function.starts_with("tracing_subscriber[")
         || function.starts_with("alloc::boxed::Box<")
 }
 
@@ -94,7 +131,9 @@ fn classify_in_app(filename: &str) -> bool {
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
-    use super::{classify_in_app, is_internal_frame};
+    use zbierak_protocol::StackFrame;
+
+    use super::{classify_in_app, is_internal_frame, truncate_frame_fields};
 
     #[test]
     fn toolchain_and_registry_paths_are_not_in_app() {
@@ -151,5 +190,49 @@ mod tests {
         // Names that merely share a prefix with the machinery stay visible.
         assert!(!is_internal_frame("backend::app::route"));
         assert!(!is_internal_frame("object_store::tree::walk"));
+    }
+
+    #[test]
+    fn tracing_dispatch_frames_are_filtered() {
+        for name in [
+            "tracing::error!",
+            "tracing::level_filters::LevelFilter::current",
+            "tracing_core::dispatcher::get_default",
+            "tracing_core[9347222e4ed66466]::dispatcher::get_default::<(), ()>",
+            "tracing_subscriber::layer::SubscriberExt::with",
+            "tracing_subscriber[9347222e4ed66466]::registry::Layered::on_event",
+            "<tracing_subscriber::registry::Layers>::on_event",
+        ] {
+            assert!(is_internal_frame(name), "not filtered: {name}");
+        }
+        // Lookalike crates that share a prefix but not the `::` stay visible.
+        assert!(!is_internal_frame("tracing_appender::rolling::worker"));
+        assert!(!is_internal_frame(
+            "tracing_appender[9347]::rolling::worker"
+        ));
+        assert!(!is_internal_frame("game::tracing::instrument"));
+    }
+
+    #[test]
+    fn oversized_frame_fields_are_truncated_to_the_protocol_limit() {
+        let mut frame = StackFrame {
+            function: Some(format!("game::tick::{}", "x".repeat(2_048))),
+            filename: Some(format!("src/{}", "a".repeat(2_000))),
+            module: Some("m".repeat(1_025)),
+            ..StackFrame::default()
+        };
+        truncate_frame_fields(&mut frame);
+        assert_eq!(frame.function.as_deref().map(str::len), Some(1_024));
+        assert_eq!(frame.filename.as_deref().map(str::len), Some(1_024));
+        assert_eq!(frame.module.as_deref().map(str::len), Some(1_024));
+        // Multi-byte characters are never split.
+        let mut frame = StackFrame {
+            function: Some("\u{1F600}".repeat(800)),
+            ..StackFrame::default()
+        };
+        truncate_frame_fields(&mut frame);
+        let function = frame.function.expect("truncation keeps the value");
+        assert!(function.len() <= 1_024);
+        assert!(function.is_char_boundary(function.len()));
     }
 }
