@@ -209,7 +209,7 @@ async fn failed_audit_rolls_back_password_change() {
 
     let response = app
         .oneshot(session.post_form(
-            "/settings/password",
+            "/users/1/password",
             &[
                 ("csrf_token", &session.csrf),
                 ("current_password", OWNER_PASSWORD),
@@ -252,7 +252,7 @@ async fn failed_audit_rolls_back_session_revocation() {
     block_audit(&db).await;
     let response = app
         .oneshot(session.post_form(
-            &format!("/settings/sessions/{other_id}/revoke"),
+            &format!("/users/1/sessions/{other_id}/revoke"),
             &[("csrf_token", &session.csrf)],
         ))
         .await

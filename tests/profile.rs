@@ -68,7 +68,7 @@ fn upload_request(
     content_type: &str,
     bytes: &[u8],
 ) -> Request<Body> {
-    Request::post("/settings/avatar")
+    Request::post("/users/1/avatar")
         .header("cookie", logged_in.cookie_header.clone())
         .header(
             "content-type",
@@ -110,7 +110,7 @@ async fn display_name_change_updates_sidebar_and_is_audited() {
     let response = app
         .clone()
         .oneshot(logged_in.post_form(
-            "/settings/profile",
+            "/users/1/profile",
             &[("csrf_token", &logged_in.csrf), ("display_name", "Renamed")],
         ))
         .await
@@ -138,7 +138,7 @@ async fn display_name_change_rejects_a_blank_name() {
 
     let response = app
         .oneshot(logged_in.post_form(
-            "/settings/profile",
+            "/users/1/profile",
             &[("csrf_token", &logged_in.csrf), ("display_name", "")],
         ))
         .await
@@ -157,7 +157,7 @@ async fn display_name_change_requires_csrf() {
 
     let response = app
         .oneshot(logged_in.post_form(
-            "/settings/profile",
+            "/users/1/profile",
             &[("csrf_token", "wrong"), ("display_name", "Nope")],
         ))
         .await
@@ -219,10 +219,7 @@ async fn avatar_upload_serves_conditional_content_and_can_be_removed() {
 
     let removed = app
         .clone()
-        .oneshot(logged_in.post_form(
-            "/settings/avatar/delete",
-            &[("csrf_token", &logged_in.csrf)],
-        ))
+        .oneshot(logged_in.post_form("/users/1/avatar/delete", &[("csrf_token", &logged_in.csrf)]))
         .await
         .unwrap();
     assert_eq!(removed.status(), StatusCode::OK);

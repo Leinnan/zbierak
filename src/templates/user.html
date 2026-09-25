@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% import "fragments/ui.html" as ui %}
+{% block title %}{{ profile.display_name }} · {{ app_name | default(value="Zbierak") }}{% endblock title %}
+{% block content %}
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">User</p>
+    <h1>{{ profile.display_name }}</h1>
+    <p>{{ profile.email }}{% if profile_is_instance_owner %} · instance owner{% endif %}</p>
+  </div>
+  {% if can_edit_profile %}<div><a class="btn btn-primary" href="/users/{{ profile.id }}/settings">Change settings</a></div>{% endif %}
+</header>
+
+<div class="project-endpoint-list">
+  <article class="card management-card">
+    <div class="card-header"><div><h3 class="card-title">Identity</h3><p>Who this user is on the instance.</p></div></div>
+    <div class="card-body">
+      <div class="d-flex align-items-center gap-3">
+        {% if profile.avatar %}{{ ui::avatar(name=profile.display_name, avatar_url=profile.avatar.url, user_id=profile.id, size="lg") }}{% else %}{{ ui::avatar(name=profile.display_name, user_id=profile.id, size="lg") }}{% endif %}
+        <div>
+          <strong>{{ profile.display_name }}</strong>
+          <div class="text-secondary">{{ profile.email }}</div>
+          <div><small>Member since <time class="js-local-time" data-unix="{{ member_since }}">{{ member_since }}</time></small></div>
+        </div>
+      </div>
+    </div>
+  </article>
+
+  <article class="card management-card">
+    <div class="card-header"><div><h3 class="card-title">Projects</h3><p>Projects you share with this user{% if profile_is_instance_owner %}, or all of their memberships as the instance owner{% endif %}.</p></div><span>{{ projects | default(value=[]) | length }}</span></div>
+    <div class="list-group list-group-flush">
+      {% for project in projects | default(value=[]) %}
+      <a class="list-group-item management-row list-group-item-action" href="/projects/{{ project.slug }}">
+        <div><strong>{{ project.name }}</strong><small><code>{{ project.slug }}</code></small></div>
+        <span class="role-badge">{{ project.role }}</span>
+      </a>
+      {% else %}
+      <div class="list-group-item text-secondary">No shared projects.</div>
+      {% endfor %}
+    </div>
+  </article>
+
+  <article class="card management-card">
+    <div class="card-header"><div><h3 class="card-title">Latest activity</h3><p>Recent comments, status changes, and tag edits in projects you can see.</p></div></div>
+    <div class="list-group list-group-flush">
+      {% for item in activity | default(value=[]) %}
+      <a class="list-group-item management-row list-group-item-action" href="/projects/{{ item.project_slug }}/issues/{{ item.issue_id }}">
+        <div>
+          <strong>{{ item.action }}</strong>
+          {% if item.status_from %}<span class="status-pill"><span aria-hidden="true"></span>{{ item.status_from }}</span>{% endif %}
+          {% if item.status_to %}<span class="status-pill status-{{ item.status_to }}"><span aria-hidden="true"></span>{{ item.status_to }}</span>{% endif %}
+          <small>{{ item.issue_title }}</small>
+          <small><code>{{ item.project_slug }}</code></small>
+        </div>
+        <div class="text-end"><small><time class="js-local-time" data-unix="{{ item.created_at }}">{{ item.created_at }}</time></small></div>
+      </a>
+      {% else %}
+      <div class="list-group-item text-secondary">No recent activity.</div>
+      {% endfor %}
+    </div>
+  </article>
+</div>
+{% endblock content %}

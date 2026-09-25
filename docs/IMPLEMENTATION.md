@@ -38,11 +38,18 @@ separates it from potential future work.
 - The login form carries a double-submit CSRF token backed by an anonymous
   cookie. Failed logins are throttled per identity: five consecutive failures
   lock the account for fifteen minutes; successful logins reset the counter.
-- Users can change their password from the settings page (which signs out all
-  other sessions), list active sessions, revoke individual sessions, and sign
+- Every account gets a public profile page at `GET /users/{user_id}` showing
+  identity, shared projects, and the user's latest activity (comments, status
+  changes, tag edits) limited to projects the viewer can see. A global
+  directory lives at `GET /users`.
+- User settings moved off the general settings page to
+  `GET /users/{user_id}/settings`. The page is editable by the profile owner
+  or the instance owner (the bootstrap/first user); passwords and sessions
+  are strictly self-service. Password changes sign out all other sessions;
+  users can also list active sessions, revoke individual sessions, and sign
   out everywhere except the current browser.
 - Users can change their display name and upload a profile avatar from the
-  Settings profile card. Uploads are limited to PNG, JPEG, or WebP, decoded by
+  user settings page. Uploads are limited to PNG, JPEG, or WebP, decoded by
   magic bytes, center-cropped and resized to 256×256, and re-encoded to PNG
   before being stored as a BLOB in the `user_avatars` table (so no SVG or other
   active content is ever served). Avatars are served same-origin at

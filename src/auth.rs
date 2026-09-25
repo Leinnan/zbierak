@@ -318,6 +318,39 @@ pub async fn ingest_key_project(
     .ok_or(AppError::Unauthorized)
 }
 
+/// Returns true when `user_id` is the instance owner, defined as the first
+/// user ever created (bootstrap). Users are never deleted, so the lowest id
+/// always identifies the bootstrap account.
+pub async fn is_instance_owner(state: &AppState, user_id: i64) -> AppResult<bool> {
+    let first: Option<i64> = sqlx::query_scalar("SELECT MIN(id) FROM users")
+        .fetch_one(&state.db)
+        .await?;
+    Ok(first == Some(user_id))
+}
+
+/// Loads a user by id, attaching the avatar reference when one is stored.
+/// Returns `None` for unknown ids.
+pub async fn user_by_id(state: &AppState, user_id: i64) -> AppResult<Option<User>> {
+    let row = sqlx::query_as::<_, (i64, String, String, Option<String>)>(
+        "SELECT u.id, u.email, u.display_name, a.sha256
+         FROM users u
+         LEFT JOIN user_avatars a ON a.user_id = u.id
+         WHERE u.id = ?",
+    )
+    .bind(user_id)
+    .fetch_optional(&state.db)
+    .await?;
+    Ok(row.map(|(id, email, display_name, avatar_sha256)| User {
+        id,
+        email,
+        display_name,
+        avatar: avatar_sha256.map(|sha256| AvatarRef {
+            url: format!("/users/{id}/avatar?v={}", &sha256[..sha256.len().min(16)]),
+            version: sha256,
+        }),
+    }))
+}
+
 /// Requires membership in the project identified by `slug` with at least
 /// `minimum` capability. Unknown roles stored in the database fail closed.
 /// Returns the project id on success.

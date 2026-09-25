@@ -1,0 +1,96 @@
+{% extends "base.html" %}
+{% import "fragments/ui.html" as ui %}
+{% block title %}{{ profile.display_name }} · User settings · {{ app_name | default(value="Zbierak") }}{% endblock title %}
+{% block content %}
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">User settings</p>
+    <h1>{{ profile.display_name }}</h1>
+    {% if is_self %}<p>Your identity and account security.</p>{% else %}<p>You are editing {{ profile.display_name }}'s profile as the instance owner.</p>{% endif %}
+  </div>
+  <div><a class="btn btn-outline-secondary" href="/users/{{ profile.id }}">Back to profile</a></div>
+</header>
+
+<div class="settings-layout">
+  <nav class="settings-nav" aria-label="User settings sections"><a href="#profile">Profile</a>{% if is_self %}<a href="#account">Account</a>{% endif %}</nav>
+  <div class="settings-content">
+    <section class="settings-section" id="profile" aria-labelledby="profile-title">
+      <div class="section-heading"><div><p class="eyebrow">Identity</p><h2 id="profile-title">Profile</h2></div></div>
+      <article class="card settings-card">
+        <div class="card-header"><div><h3 class="card-title">Display name and avatar</h3><p>The name appears on comments and membership; the avatar shows across the operator UI.</p></div></div>
+        <div class="card-body">
+          <div class="d-flex align-items-center gap-3 mb-3">
+            {% if profile.avatar %}{{ ui::avatar(name=profile.display_name, avatar_url=profile.avatar.url, user_id=profile.id, size="lg") }}{% else %}{{ ui::avatar(name=profile.display_name, user_id=profile.id, size="lg") }}{% endif %}
+            <div><strong>{{ profile.display_name }}</strong><div class="text-secondary">{{ profile.email }}</div></div>
+          </div>
+          <form class="compact-form" method="post" action="/users/{{ profile.id }}/avatar" enctype="multipart/form-data">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><label class="form-label" for="avatar-file">Avatar image</label><input class="form-control" id="avatar-file" name="avatar" type="file" accept="image/png,image/jpeg,image/webp" required><div class="form-hint">PNG, JPEG, or WebP, up to 2 MiB. Resized to 256×256.</div></div>
+            <button class="btn btn-primary" type="submit">Upload avatar</button>
+          </form>
+          {% if profile.avatar %}
+          <form method="post" action="/users/{{ profile.id }}/avatar/delete">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button class="btn btn-outline-danger" type="submit" data-confirm="{% if is_self %}Remove your avatar?{% else %}Remove {{ profile.display_name }}'s avatar?{% endif %}">Remove avatar</button>
+          </form>
+          {% endif %}
+        </div>
+      </article>
+      <article class="card settings-card">
+        <div class="card-header"><div><h3 class="card-title">Display name</h3><p>Shown to other members and in the operator UI.</p></div></div>
+        <div class="card-body">
+          <form class="compact-form" method="post" action="/users/{{ profile.id }}/profile">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <div><label class="form-label" for="profile-display-name">Display name</label><input class="form-control" id="profile-display-name" name="display_name" maxlength="100" value="{{ profile.display_name }}" required></div>
+            <button class="btn btn-primary" type="submit">Save name</button>
+          </form>
+        </div>
+      </article>
+    </section>
+
+    {% if is_self %}
+    <section class="settings-section" id="account" aria-labelledby="account-title">
+      <div class="section-heading"><div><p class="eyebrow">Security</p><h2 id="account-title">Account</h2></div></div>
+      <div class="project-endpoint-list">
+        <article class="card endpoint-create-card">
+          <div class="card-header"><div><h3 class="card-title">Change password</h3><p>Other sessions are signed out when the password changes.</p></div></div>
+          <div class="card-body">
+            <form class="compact-form" method="post" action="/users/{{ profile.id }}/password">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <div><label class="form-label" for="current-password">Current password</label><input class="form-control" id="current-password" name="current_password" type="password" autocomplete="current-password" required></div>
+              <div><label class="form-label" for="new-password">New password</label><input class="form-control" id="new-password" name="new_password" type="password" minlength="12" maxlength="1024" autocomplete="new-password" required><div class="form-hint">At least 12 characters.</div></div>
+              <button class="btn btn-primary" type="submit">Update password</button>
+            </form>
+          </div>
+        </article>
+        <article class="card endpoint-create-card">
+          <div class="card-header"><div><h3 class="card-title">Active sessions</h3><p>Sessions expire automatically; revoke anything you do not recognize.</p></div></div>
+          <div class="list-group list-group-flush">
+            {% for session_row in sessions | default(value=[]) %}
+            <div class="list-group-item management-row">
+              <div><strong>{% if session_row.is_current %}This session{% else %}Session #{{ session_row.id }}{% endif %}</strong><small>Started <time class="js-local-time" data-unix="{{ session_row.created_at }}">{{ session_row.created_at }}</time></small></div>
+              <div class="text-end"><small>Expires <time class="js-local-time" data-unix="{{ session_row.expires_at }}">{{ session_row.expires_at }}</time></small></div>
+              {% if not session_row.is_current %}
+              <form method="post" action="/users/{{ profile.id }}/sessions/{{ session_row.id }}/revoke">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                <button class="btn btn-sm btn-outline-danger" type="submit">Revoke</button>
+              </form>
+              {% endif %}
+            </div>
+            {% else %}
+            <div class="list-group-item text-secondary">No active sessions.</div>
+            {% endfor %}
+          </div>
+          <div class="card-footer">
+            <form method="post" action="/users/{{ profile.id }}/sessions/revoke-others">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button class="btn btn-outline-danger" type="submit">Sign out everywhere else</button>
+            </form>
+          </div>
+        </article>
+      </div>
+    </section>
+    {% endif %}
+  </div>
+</div>
+{% endblock content %}

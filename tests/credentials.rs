@@ -190,7 +190,7 @@ async fn password_change_requires_current_password_and_evicts_other_sessions() {
             &app,
             &session,
             &csrf,
-            "/settings/password",
+            "/users/1/password",
             "&current_password=not-the-password&new_password=new-correct-password",
         ))
         .await
@@ -203,7 +203,7 @@ async fn password_change_requires_current_password_and_evicts_other_sessions() {
             &app,
             &session,
             &csrf,
-            "/settings/password",
+            "/users/1/password",
             "&current_password=correct-horse-staple-12&new_password=new-correct-password",
         ))
         .await
@@ -254,7 +254,7 @@ async fn session_revocation_removes_only_the_target() {
             &app,
             &session,
             &csrf,
-            "/settings/sessions/revoke-others",
+            "/users/1/sessions/revoke-others",
             "",
         ))
         .await

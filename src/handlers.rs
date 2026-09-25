@@ -1404,11 +1404,7 @@ pub async fn update_issue_tags_form(
     Ok(Redirect::to(&format!("/projects/{slug}/issues/{issue_id}")))
 }
 
-async fn settings_context(
-    state: &AppState,
-    session: &auth::Session,
-    current_session_hash: Option<String>,
-) -> AppResult<Context> {
+async fn settings_context(state: &AppState, session: &auth::Session) -> AppResult<Context> {
     let projects = sqlx::query_as::<_, ProjectRow>(
         "SELECT p.slug AS id, p.slug, p.name, m.role, p.created_at, p.description, p.status,
                 '/api/v1/projects/' || p.slug || '/events' AS ingest_url FROM projects p
@@ -1430,15 +1426,7 @@ async fn settings_context(
     let mut context = page_context(&session.user, &session.csrf_token);
     context.insert("projects", &projects);
     context.insert("notification_endpoints", &endpoints);
-    let sessions = sqlx::query_as::<_, SessionRow>(
-        "SELECT id, created_at, expires_at, (token_hash = ?) AS is_current FROM sessions
-         WHERE user_id=? AND expires_at > unixepoch() ORDER BY created_at DESC",
-    )
-    .bind(current_session_hash.unwrap_or_default())
-    .bind(session.user.id)
-    .fetch_all(&state.db)
-    .await?;
-    context.insert("sessions", &sessions);
+    context.insert("active_page", "settings");
     let api_tokens = sqlx::query_as::<_, ApiTokenRow>(
         "SELECT id, name, token_prefix, created_at, last_used_at FROM api_tokens
          WHERE user_id=? AND revoked_at IS NULL ORDER BY created_at DESC",
@@ -1450,37 +1438,17 @@ async fn settings_context(
     Ok(context)
 }
 
-/// Re-renders the settings page with a flash banner after a profile mutation.
-async fn settings_flash_response(
-    state: &AppState,
-    session: &auth::Session,
-    cookies: &Cookies,
-    message: &str,
-    kind: &str,
-) -> AppResult<Html<String>> {
-    let current_hash = cookies
-        .get(auth::SESSION_COOKIE)
-        .map(|cookie| auth::token_hash(cookie.value()));
-    let mut context = settings_context(state, session, current_hash).await?;
-    context.insert("flash_message", message);
-    context.insert("flash_type", kind);
-    render(state, "settings.html", &context)
-}
-
 pub async fn settings(
     State(state): State<AppState>,
-    UiSession { session, cookies }: UiSession,
+    UiSession { session, .. }: UiSession,
 ) -> AppResult<Html<String>> {
-    let current_hash = cookies
-        .get(auth::SESSION_COOKIE)
-        .map(|cookie| auth::token_hash(cookie.value()));
-    let context = settings_context(&state, &session, current_hash).await?;
+    let context = settings_context(&state, &session).await?;
     render(&state, "settings.html", &context)
 }
 
 pub async fn create_api_token(
     State(state): State<AppState>,
-    UiSession { session, cookies }: UiSession,
+    UiSession { session, .. }: UiSession,
     UiForm(form): UiForm<TokenForm>,
 ) -> AppResult<Html<String>> {
     auth::check_csrf(&session, &form.csrf_token)?;
@@ -1506,10 +1474,7 @@ pub async fn create_api_token(
     )
     .await?;
     tx.commit().await?;
-    let current_hash = cookies
-        .get(auth::SESSION_COOKIE)
-        .map(|cookie| auth::token_hash(cookie.value()));
-    let mut context = settings_context(&state, &session, current_hash).await?;
+    let mut context = settings_context(&state, &session).await?;
     context.insert("new_api_token", &token);
     render(&state, "settings.html", &context)
 }
@@ -1545,9 +1510,15 @@ pub async fn revoke_api_token(
 pub async fn change_password(
     State(state): State<AppState>,
     UiSession { session, cookies }: UiSession,
+    AxumPath(user_id): AxumPath<i64>,
     UiForm(form): UiForm<PasswordForm>,
 ) -> AppResult<Redirect> {
     auth::check_csrf(&session, &form.csrf_token)?;
+    // Passwords and sessions are strictly self-service; an instance owner may
+    // edit another profile's identity but never its credentials.
+    if user_id != session.user.id {
+        return Err(AppError::Forbidden);
+    }
     let hash: String = sqlx::query_scalar("SELECT password_hash FROM users WHERE id=?")
         .bind(session.user.id)
         .fetch_one(&state.db)
@@ -1583,7 +1554,26 @@ pub async fn change_password(
     )
     .await?;
     tx.commit().await?;
-    Ok(Redirect::to("/settings"))
+    Ok(Redirect::to(format!("/users/{user_id}/settings").as_str()))
+}
+
+/// Loads the profile user for `user_id` and verifies that the session user
+/// may edit it: either the profile is their own, or they are the instance
+/// owner (the first/bootstrap user).
+async fn require_profile_editor(
+    state: &AppState,
+    session: &auth::Session,
+    user_id: i64,
+) -> AppResult<auth::User> {
+    let target = auth::user_by_id(state, user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let permitted =
+        session.user.id == target.id || auth::is_instance_owner(state, session.user.id).await?;
+    if !permitted {
+        return Err(AppError::Forbidden);
+    }
+    Ok(target)
 }
 
 pub async fn update_profile(
@@ -1592,29 +1582,47 @@ pub async fn update_profile(
         mut session,
         cookies,
     }: UiSession,
+    AxumPath(user_id): AxumPath<i64>,
     UiForm(form): UiForm<ProfileForm>,
 ) -> AppResult<Html<String>> {
     auth::check_csrf(&session, &form.csrf_token)?;
+    let target = require_profile_editor(&state, &session, user_id).await?;
     let display_name = required_text("display name", &form.display_name, 100)?;
     let mut tx = state.db.begin().await?;
     sqlx::query("UPDATE users SET display_name=? WHERE id=?")
         .bind(display_name)
-        .bind(session.user.id)
+        .bind(target.id)
         .execute(&mut *tx)
         .await?;
+    // When the instance owner edits somebody else, record who acted so the
+    // audit trail can distinguish self-service changes from admin changes.
+    let mut details = json!({ "field": "display_name" });
+    if target.id != session.user.id {
+        details["actor_id"] = json!(session.user.id);
+    }
     audit::record(
         &mut *tx,
         Some(session.user.id),
         "user.updated",
         Some("user"),
-        Some(session.user.id.to_string()),
-        json!({ "field": "display_name" }),
+        Some(target.id.to_string()),
+        details,
     )
     .await?;
     tx.commit().await?;
-    // Reflect the new name in the response without another database read.
-    session.user.display_name = display_name.to_owned();
-    settings_flash_response(&state, &session, &cookies, "Profile updated.", "success").await
+    // Reflect the new name in the sidebar without another database read.
+    if target.id == session.user.id {
+        session.user.display_name = display_name.to_owned();
+    }
+    user_settings_flash_response(
+        &state,
+        &session,
+        target.id,
+        &cookies,
+        "Profile updated.",
+        "success",
+    )
+    .await
 }
 
 pub async fn upload_avatar(
@@ -1623,11 +1631,13 @@ pub async fn upload_avatar(
         mut session,
         cookies,
     }: UiSession,
+    AxumPath(user_id): AxumPath<i64>,
     UiMultipart {
         csrf_token, bytes, ..
     }: UiMultipart,
 ) -> AppResult<Html<String>> {
     auth::check_csrf(&session, &csrf_token)?;
+    let target = require_profile_editor(&state, &session, user_id).await?;
     let png = avatars::normalize_upload(&bytes)?;
     let sha256 = auth::sha256_hex(&png);
     let byte_size = i64::try_from(png.len())
@@ -1643,27 +1653,41 @@ pub async fn upload_avatar(
              bytes=excluded.bytes,
              updated_at=excluded.updated_at",
     )
-    .bind(session.user.id)
+    .bind(target.id)
     .bind(byte_size)
     .bind(&sha256)
     .bind(&png)
     .execute(&mut *tx)
     .await?;
+    let mut details = json!({ "bytes": byte_size });
+    if target.id != session.user.id {
+        details["actor_id"] = json!(session.user.id);
+    }
     audit::record(
         &mut *tx,
         Some(session.user.id),
         "avatar.updated",
         Some("user"),
-        Some(session.user.id.to_string()),
-        json!({ "bytes": byte_size }),
+        Some(target.id.to_string()),
+        details,
     )
     .await?;
     tx.commit().await?;
-    session.user.avatar = Some(auth::AvatarRef {
-        url: format!("/users/{}/avatar?v={}", session.user.id, &sha256[..16]),
-        version: sha256,
-    });
-    settings_flash_response(&state, &session, &cookies, "Avatar updated.", "success").await
+    if target.id == session.user.id {
+        session.user.avatar = Some(auth::AvatarRef {
+            url: format!("/users/{}/avatar?v={}", session.user.id, &sha256[..16]),
+            version: sha256,
+        });
+    }
+    user_settings_flash_response(
+        &state,
+        &session,
+        target.id,
+        &cookies,
+        "Avatar updated.",
+        "success",
+    )
+    .await
 }
 
 pub async fn delete_avatar(
@@ -1672,34 +1696,54 @@ pub async fn delete_avatar(
         mut session,
         cookies,
     }: UiSession,
+    AxumPath(user_id): AxumPath<i64>,
     UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Html<String>> {
     auth::check_csrf(&session, &form.csrf_token)?;
+    let target = require_profile_editor(&state, &session, user_id).await?;
     let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM user_avatars WHERE user_id=?")
-        .bind(session.user.id)
+        .bind(target.id)
         .execute(&mut *tx)
         .await?;
+    let mut details = json!({});
+    if target.id != session.user.id {
+        details["actor_id"] = json!(session.user.id);
+    }
     audit::record(
         &mut *tx,
         Some(session.user.id),
         "avatar.removed",
         Some("user"),
-        Some(session.user.id.to_string()),
-        json!({}),
+        Some(target.id.to_string()),
+        details,
     )
     .await?;
     tx.commit().await?;
-    session.user.avatar = None;
-    settings_flash_response(&state, &session, &cookies, "Avatar removed.", "success").await
+    if target.id == session.user.id {
+        session.user.avatar = None;
+    }
+    user_settings_flash_response(
+        &state,
+        &session,
+        target.id,
+        &cookies,
+        "Avatar removed.",
+        "success",
+    )
+    .await
 }
 
 pub async fn revoke_other_sessions(
     State(state): State<AppState>,
     UiSession { session, cookies }: UiSession,
+    AxumPath(user_id): AxumPath<i64>,
     UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Redirect> {
     auth::check_csrf(&session, &form.csrf_token)?;
+    if user_id != session.user.id {
+        return Err(AppError::Forbidden);
+    }
     let current = cookies
         .get(auth::SESSION_COOKIE)
         .map(|cookie| auth::token_hash(cookie.value()))
@@ -1720,16 +1764,19 @@ pub async fn revoke_other_sessions(
     )
     .await?;
     tx.commit().await?;
-    Ok(Redirect::to("/settings"))
+    Ok(Redirect::to(format!("/users/{user_id}/settings").as_str()))
 }
 
 pub async fn revoke_session(
     State(state): State<AppState>,
     UiSession { session, .. }: UiSession,
-    AxumPath(session_id): AxumPath<i64>,
+    AxumPath((user_id, session_id)): AxumPath<(i64, i64)>,
     UiForm(form): UiForm<CsrfForm>,
 ) -> AppResult<Redirect> {
     auth::check_csrf(&session, &form.csrf_token)?;
+    if user_id != session.user.id {
+        return Err(AppError::Forbidden);
+    }
     let mut tx = state.db.begin().await?;
     sqlx::query("DELETE FROM sessions WHERE id=? AND user_id=?")
         .bind(session_id)
@@ -1746,7 +1793,290 @@ pub async fn revoke_session(
     )
     .await?;
     tx.commit().await?;
-    Ok(Redirect::to("/settings"))
+    Ok(Redirect::to(format!("/users/{user_id}/settings").as_str()))
+}
+
+#[derive(Debug, Serialize, FromRow)]
+struct UserDirectoryRow {
+    id: i64,
+    email: String,
+    display_name: String,
+    created_at: i64,
+    /// Avatar digest of the user, when one is uploaded.
+    avatar_sha256: Option<String>,
+    /// Number of projects the user belongs to.
+    project_count: i64,
+    /// Same-origin avatar URL derived from `avatar_sha256` after loading.
+    #[sqlx(skip)]
+    avatar_url: Option<String>,
+    /// True for the bootstrap account that owns the instance.
+    #[sqlx(skip)]
+    is_instance_owner: bool,
+}
+
+/// One entry of the recent-activity feed shown on a user profile page.
+#[derive(Debug, Serialize)]
+struct UserActivityView {
+    id: i64,
+    kind: String,
+    /// Human-readable action phrase, e.g. "commented on".
+    action: String,
+    /// Previous status, set only for `status` entries.
+    status_from: Option<String>,
+    /// New status, set only for `status` entries.
+    status_to: Option<String>,
+    issue_id: i64,
+    issue_title: String,
+    project_slug: String,
+    created_at: i64,
+}
+
+#[derive(Debug, FromRow)]
+struct UserActivityRow {
+    id: i64,
+    kind: String,
+    details_json: String,
+    created_at: i64,
+    issue_id: i64,
+    issue_title: String,
+    project_slug: String,
+}
+
+/// Human-readable action phrase for an `issue_activity` kind, plus the
+/// status transition when the entry records one.
+fn describe_activity(kind: &str, details: &Value) -> (String, Option<String>, Option<String>) {
+    match kind {
+        "comment" => ("commented on".into(), None, None),
+        "comment_edited" => ("edited a comment on".into(), None, None),
+        "comment_deleted" => ("deleted a comment on".into(), None, None),
+        "status" => {
+            let from = details
+                .get("from")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let to = details.get("to").and_then(Value::as_str).map(str::to_owned);
+            ("changed status on".into(), from, to)
+        }
+        "tags" => ("updated tags on".into(), None, None),
+        "regression" => ("regression on".into(), None, None),
+        _ => ("updated".into(), None, None),
+    }
+}
+
+/// Directory of every registered user, visible to any signed-in operator.
+pub async fn users(
+    State(state): State<AppState>,
+    UiSession { session, .. }: UiSession,
+) -> AppResult<Html<String>> {
+    let mut context = page_context(&session.user, &session.csrf_token);
+    context.insert("active_page", "users");
+    let owner_id: Option<i64> = sqlx::query_scalar("SELECT MIN(id) FROM users")
+        .fetch_one(&state.db)
+        .await?;
+    let mut rows = sqlx::query_as::<_, UserDirectoryRow>(
+        "SELECT u.id, u.email, u.display_name, u.created_at, a.sha256 AS avatar_sha256,
+                (SELECT count(*) FROM project_memberships m WHERE m.user_id = u.id) AS project_count
+         FROM users u
+         LEFT JOIN user_avatars a ON a.user_id = u.id
+         ORDER BY u.id",
+    )
+    .fetch_all(&state.db)
+    .await?;
+    for row in &mut rows {
+        row.avatar_url = avatar_url(row.id, row.avatar_sha256.as_deref());
+        row.is_instance_owner = owner_id == Some(row.id);
+    }
+    context.insert("directory", &rows);
+    render(&state, "users.html", &context)
+}
+
+/// Loads the recent activity entries for `target_id`, restricted to projects
+/// shared with `viewer_id` unless `unrestricted` (instance owner).
+async fn user_activity(
+    state: &AppState,
+    target_id: i64,
+    viewer_id: i64,
+    unrestricted: bool,
+) -> AppResult<Vec<UserActivityView>> {
+    // Memberships are filtered to projects shared with the viewer so profile
+    // pages never leak project activity across team boundaries; the instance
+    // owner sees everything.
+    let activity_rows = if unrestricted {
+        sqlx::query_as::<_, UserActivityRow>(
+            "SELECT a.id, a.kind, a.details_json, a.created_at,
+                    i.id AS issue_id, i.title AS issue_title, p.slug AS project_slug
+             FROM issue_activity a
+             JOIN issues i ON i.id = a.issue_id
+             JOIN projects p ON p.id = i.project_id
+             WHERE a.user_id = ?
+             ORDER BY a.created_at DESC, a.id DESC
+             LIMIT 30",
+        )
+        .bind(target_id)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<_, UserActivityRow>(
+            "SELECT a.id, a.kind, a.details_json, a.created_at,
+                    i.id AS issue_id, i.title AS issue_title, p.slug AS project_slug
+             FROM issue_activity a
+             JOIN issues i ON i.id = a.issue_id
+             JOIN projects p ON p.id = i.project_id
+             WHERE a.user_id = ?
+               AND EXISTS (SELECT 1 FROM project_memberships v
+                           WHERE v.project_id = p.id AND v.user_id = ?)
+             ORDER BY a.created_at DESC, a.id DESC
+             LIMIT 30",
+        )
+        .bind(target_id)
+        .bind(viewer_id)
+        .fetch_all(&state.db)
+        .await?
+    };
+    Ok(activity_rows
+        .into_iter()
+        .map(|row| {
+            let details: Value = serde_json::from_str(&row.details_json).unwrap_or(Value::Null);
+            let (action, status_from, status_to) = describe_activity(&row.kind, &details);
+            UserActivityView {
+                issue_id: row.issue_id,
+                issue_title: row.issue_title,
+                project_slug: row.project_slug,
+                created_at: row.created_at,
+                id: row.id,
+                kind: row.kind,
+                action,
+                status_from,
+                status_to,
+            }
+        })
+        .collect())
+}
+
+/// Public profile page for one user: identity, shared projects, and the
+/// latest activity within projects the viewer can see.
+pub async fn user_profile(
+    State(state): State<AppState>,
+    UiSession { session, .. }: UiSession,
+    AxumPath(user_id): AxumPath<i64>,
+) -> AppResult<Html<String>> {
+    let target = auth::user_by_id(&state, user_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let viewer_is_owner = auth::is_instance_owner(&state, session.user.id).await?;
+    let target_is_owner = auth::is_instance_owner(&state, target.id).await?;
+    let mut context = page_context(&session.user, &session.csrf_token);
+    context.insert("active_page", "users");
+    context.insert("profile", &target);
+    context.insert("profile_is_instance_owner", &target_is_owner);
+    context.insert(
+        "can_edit_profile",
+        &(target.id == session.user.id || viewer_is_owner),
+    );
+    let member_since: i64 = sqlx::query_scalar("SELECT created_at FROM users WHERE id=?")
+        .bind(target.id)
+        .fetch_one(&state.db)
+        .await?;
+    context.insert("member_since", &member_since);
+    let projects = if viewer_is_owner {
+        sqlx::query_as::<_, ProjectRow>(
+            "SELECT p.slug AS id, p.slug, p.name, m.role, p.created_at, p.description, p.status,
+                    '' AS ingest_url
+             FROM projects p
+             JOIN project_memberships m ON m.project_id = p.id
+             WHERE m.user_id = ? ORDER BY p.name",
+        )
+        .bind(target.id)
+        .fetch_all(&state.db)
+        .await?
+    } else {
+        sqlx::query_as::<_, ProjectRow>(
+            "SELECT p.slug AS id, p.slug, p.name, m.role, p.created_at, p.description, p.status,
+                    '' AS ingest_url
+             FROM projects p
+             JOIN project_memberships m ON m.project_id = p.id
+             WHERE m.user_id = ?
+               AND EXISTS (SELECT 1 FROM project_memberships v
+                           WHERE v.project_id = p.id AND v.user_id = ?)
+             ORDER BY p.name",
+        )
+        .bind(target.id)
+        .bind(session.user.id)
+        .fetch_all(&state.db)
+        .await?
+    };
+    context.insert("projects", &projects);
+    context.insert(
+        "activity",
+        &user_activity(&state, target.id, session.user.id, viewer_is_owner).await?,
+    );
+    render(&state, "user.html", &context)
+}
+
+/// Builds the per-user settings context. Security sections (password and
+/// sessions) are only exposed when the profile belongs to the viewer;
+/// an instance owner editing somebody else sees identity controls only.
+async fn user_settings_context(
+    state: &AppState,
+    session: &auth::Session,
+    target: &auth::User,
+    current_session_hash: Option<String>,
+) -> AppResult<Context> {
+    let is_self = session.user.id == target.id;
+    let mut context = page_context(&session.user, &session.csrf_token);
+    context.insert("active_page", "users");
+    context.insert("profile", target);
+    context.insert("is_self", &is_self);
+    if is_self {
+        let sessions = sqlx::query_as::<_, SessionRow>(
+            "SELECT id, created_at, expires_at, (token_hash = ?) AS is_current FROM sessions
+             WHERE user_id=? AND expires_at > unixepoch() ORDER BY created_at DESC",
+        )
+        .bind(current_session_hash.unwrap_or_default())
+        .bind(target.id)
+        .fetch_all(&state.db)
+        .await?;
+        context.insert("sessions", &sessions);
+    }
+    Ok(context)
+}
+
+/// Re-renders the user settings page with a flash banner after a profile
+/// mutation.
+async fn user_settings_flash_response(
+    state: &AppState,
+    session: &auth::Session,
+    target_id: i64,
+    cookies: &Cookies,
+    message: &str,
+    kind: &str,
+) -> AppResult<Html<String>> {
+    let current_hash = cookies
+        .get(auth::SESSION_COOKIE)
+        .map(|cookie| auth::token_hash(cookie.value()));
+    let target = auth::user_by_id(state, target_id)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let mut context = user_settings_context(state, session, &target, current_hash).await?;
+    context.insert("flash_message", message);
+    context.insert("flash_type", kind);
+    render(state, "user_settings.html", &context)
+}
+
+/// Per-user settings page: profile identity plus, for the signed-in user's
+/// own account, password and session management. Reachable by the profile
+/// owner and the instance owner.
+pub async fn user_settings(
+    State(state): State<AppState>,
+    UiSession { session, cookies }: UiSession,
+    AxumPath(user_id): AxumPath<i64>,
+) -> AppResult<Html<String>> {
+    let target = require_profile_editor(&state, &session, user_id).await?;
+    let current_hash = cookies
+        .get(auth::SESSION_COOKIE)
+        .map(|cookie| auth::token_hash(cookie.value()));
+    let context = user_settings_context(&state, &session, &target, current_hash).await?;
+    render(&state, "user_settings.html", &context)
 }
 
 pub async fn create_webhook(

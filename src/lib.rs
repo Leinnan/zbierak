@@ -127,17 +127,25 @@ fn ui_router() -> Router<AppState> {
             post(handlers::update_issue_tags_form),
         )
         .route("/settings", get(handlers::settings))
-        .route("/settings/profile", post(handlers::update_profile))
-        .route("/settings/avatar", post(handlers::upload_avatar))
-        .route("/settings/avatar/delete", post(handlers::delete_avatar))
-        .route("/settings/password", post(handlers::change_password))
-        .route("/users/{user_id}/avatar", get(handlers::serve_avatar))
+        .route("/users", get(handlers::users))
+        .route("/users/{user_id}", get(handlers::user_profile))
+        .route("/users/{user_id}/settings", get(handlers::user_settings))
+        .route("/users/{user_id}/profile", post(handlers::update_profile))
         .route(
-            "/settings/sessions/revoke-others",
+            "/users/{user_id}/avatar",
+            get(handlers::serve_avatar).post(handlers::upload_avatar),
+        )
+        .route(
+            "/users/{user_id}/avatar/delete",
+            post(handlers::delete_avatar),
+        )
+        .route("/users/{user_id}/password", post(handlers::change_password))
+        .route(
+            "/users/{user_id}/sessions/revoke-others",
             post(handlers::revoke_other_sessions),
         )
         .route(
-            "/settings/sessions/{session_id}/revoke",
+            "/users/{user_id}/sessions/{session_id}/revoke",
             post(handlers::revoke_session),
         )
         .route(
@@ -284,6 +292,9 @@ fn load_templates(directory: &std::path::Path) -> AppResult<Tera> {
         "project.html",
         "issue.html",
         "settings.html",
+        "users.html",
+        "user.html",
+        "user_settings.html",
         "error.html",
     ] {
         tera.get_template(name).map_err(|_| {

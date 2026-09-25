@@ -25,14 +25,17 @@
         <a href="/projects" {% if active_page | default(value="") == "projects" %}aria-current="page"{% endif %}>
           <span class="nav-glyph" aria-hidden="true">01</span> Projects
         </a>
+        <a href="/users" {% if active_page | default(value="") == "users" %}aria-current="page"{% endif %}>
+          <span class="nav-glyph" aria-hidden="true">02</span> Users
+        </a>
         <a href="/settings" {% if active_page | default(value="") == "settings" %}aria-current="page"{% endif %}>
-          <span class="nav-glyph" aria-hidden="true">02</span> Settings
+          <span class="nav-glyph" aria-hidden="true">03</span> Settings
         </a>
       </nav>
       <div class="sidebar-foot">
         <div class="user-summary">
           {% if user.avatar %}{{ ui::avatar(name=user.display_name, avatar_url=user.avatar.url, user_id=user.id) }}{% else %}{{ ui::avatar(name=user.display_name, user_id=user.id) }}{% endif %}
-          <span><strong>{{ user.display_name | default(value="Administrator") }}</strong><small>{{ user.email | default(value="") }}</small></span>
+          <a href="/users/{{ user.id }}"><strong>{{ user.display_name | default(value="Administrator") }}</strong><small>{{ user.email | default(value="") }}</small></a>
         </div>
         <form method="post" action="/logout">
           {% if csrf_token | default(value="") %}<input type="hidden" name="csrf_token" value="{{ csrf_token }}">{% endif %}
