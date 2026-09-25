@@ -362,6 +362,22 @@ non-success responses are permanent failures and are removed from its spool.
 The SDK preserves generated event IDs across spool retries, allowing the server's
 project-scoped idempotency check to suppress duplicate processing.
 
+### Stack Traces
+
+With the default `stacktraces` feature the SDK captures the current call stack
+for panics (via `Client::install_panic_hook`) and for captured errors (via
+`Client::capture_error`). Frames belonging to the Rust runtime, the SDK, the
+symbolization machinery, and the `tracing` dispatch stack are filtered so the
+first reported frame is the application call site, and overly verbose symbols
+are truncated to the protocol's per-field limit.
+
+The Bevy integration captures stack frames for forwarded log events as well:
+frames are taken inside the tracing layer, on the thread that emitted the
+`error!`/`warn!` call, so the trace starts at the log call site. Disable this
+with `ReportConfig::capture_stack_frames(false)`; capture cost then never runs
+on the emitting thread. Without the `stacktraces` feature no frames are
+collected anywhere.
+
 ## Issue Workflow And Notifications
 
 Incoming events are grouped by a BLAKE3 fingerprint. Clients can provide up to

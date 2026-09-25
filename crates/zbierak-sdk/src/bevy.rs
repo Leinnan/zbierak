@@ -9,7 +9,9 @@
 //!    `LogPlugin`. Bevy invokes the function while building its tracing
 //!    subscriber, which installs a `tracing_subscriber::Layer` that
 //!    forwards Bevy `error!` (and optionally lower-severity) log events
-//!    into a channel the drain system reads.
+//!    into a channel the drain system reads. Matching events capture the
+//!    current call-site stack frames inside the layer, on the emitting
+//!    thread ([`ReportConfig::capture_stack_frames`], on by default).
 //! 3. Add [`ZbierakPlugin`], which registers the `PreUpdate` system that
 //!    drains captured log events, applies rate limiting and duplicate
 //!    suppression, and queues them on the client.
@@ -69,7 +71,8 @@ pub enum InitError {
 ///
 /// Defaults mirror a low-noise production setup: only `error!` events are
 /// forwarded, at most 20 per rolling minute, with identical messages
-/// suppressed for a minute.
+/// suppressed for a minute, and each captured event carries the call-site
+/// stack frames.
 #[derive(Clone, Debug)]
 pub struct ReportConfig {
     /// Minimum [`Level`] forwarded to Zbierak. tracing orders levels by
@@ -89,6 +92,8 @@ pub struct ReportConfig {
     max_message_bytes: usize,
     /// Log targets with these prefixes are never captured.
     excluded_targets: Vec<String>,
+    /// Whether matching log events capture the current stack frames.
+    capture_stack_frames: bool,
 }
 
 impl Default for ReportConfig {
@@ -101,6 +106,7 @@ impl Default for ReportConfig {
             max_tracked_messages: 1024,
             max_message_bytes: 4096,
             excluded_targets: vec!["zbierak".into()],
+            capture_stack_frames: true,
         }
     }
 }
@@ -161,6 +167,22 @@ impl ReportConfig {
         self.excluded_targets = prefixes.into_iter().map(Into::into).collect();
         self
     }
+
+    /// Sets whether matching log events capture the current stack frames.
+    ///
+    /// Frames are captured inside the tracing layer, on the thread that
+    /// emitted the log event, so the first reported frame is the call site
+    /// above the `error!`/`warn!` invocation. Capturing runs before rate
+    /// limiting, on the emitting thread; disable it if hot error paths must
+    /// stay allocation- and symbolication-free.
+    ///
+    /// When the SDK is built without the `stacktraces` feature this setting
+    /// has no effect: capture degrades to an empty frame list.
+    #[must_use]
+    pub fn capture_stack_frames(mut self, capture: bool) -> Self {
+        self.capture_stack_frames = capture;
+        self
+    }
 }
 
 /// Maps a tracing level onto the protocol severities.
@@ -198,7 +220,7 @@ mod native {
     use tracing::field::{Field, Visit};
     use tracing::{Event as TracingEvent, Level, Subscriber};
     use tracing_subscriber::Layer;
-    use zbierak_protocol::{Breadcrumb, ErrorInfo, Event};
+    use zbierak_protocol::{Breadcrumb, ErrorInfo, Event, StackFrame};
 
     use super::{InitError, ReportConfig, Severity, severity_for, truncate_utf8};
     #[cfg(feature = "async")]
@@ -366,6 +388,7 @@ mod native {
             sender,
             capture_level: config.capture_level,
             excluded_targets: config.excluded_targets.clone(),
+            capture_stack_frames: config.capture_stack_frames,
         }))
     }
 
@@ -387,6 +410,9 @@ mod native {
         pub(crate) message: String,
         pub(crate) target: String,
         pub(crate) level: Level,
+        /// Call-site stack frames, empty when capture is disabled or the
+        /// `stacktraces` feature is compiled out.
+        pub(crate) frames: Vec<StackFrame>,
     }
 
     /// `custom_layer` layer forwarding matching log events to the drain
@@ -395,6 +421,7 @@ mod native {
         pub(crate) sender: Sender<CapturedLog>,
         pub(crate) capture_level: Level,
         pub(crate) excluded_targets: Vec<String>,
+        pub(crate) capture_stack_frames: bool,
     }
 
     impl<S: Subscriber> Layer<S> for LogCaptureLayer {
@@ -426,11 +453,19 @@ mod native {
             if message.starts_with("panic at ") {
                 return;
             }
+            // The layer runs on the emitting thread, so the current stack is
+            // the call site of the `error!`/`warn!` invocation.
+            let frames = if self.capture_stack_frames {
+                crate::stacktrace::capture_frames()
+            } else {
+                Vec::new()
+            };
             self.sender
                 .send(CapturedLog {
                     message,
                     target: target.to_owned(),
                     level,
+                    frames,
                 })
                 .ok();
         }
@@ -520,7 +555,7 @@ mod native {
                 error: Some(ErrorInfo {
                     type_name: "log".into(),
                     value: Some(message),
-                    ..ErrorInfo::default()
+                    stack_frames: captured.frames,
                 }),
                 ..Event::default()
             };
@@ -661,7 +696,7 @@ mod tests {
 
     use tracing::Level;
     use tracing_subscriber::layer::SubscriberExt;
-    use zbierak_protocol::Severity;
+    use zbierak_protocol::{Severity, StackFrame};
 
     use super::{ReportConfig, native, severity_for, truncate_utf8};
     use crate::Client;
@@ -704,6 +739,7 @@ mod tests {
         assert_eq!(config.max_tracked_messages, 1024);
         assert_eq!(config.max_message_bytes, 4096);
         assert_eq!(config.excluded_targets, vec!["zbierak".to_string()]);
+        assert!(config.capture_stack_frames);
     }
 
     #[test]
@@ -725,6 +761,7 @@ mod tests {
             message: "same failure".into(),
             target: "game::system".into(),
             level: Level::ERROR,
+            frames: Vec::new(),
         })
         .take(3);
         native::process_captured(&client, &config, &mut state, logs);
@@ -739,6 +776,7 @@ mod tests {
             sender,
             capture_level: config.capture_level,
             excluded_targets: config.excluded_targets.clone(),
+            capture_stack_frames: false,
         };
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
@@ -751,12 +789,99 @@ mod tests {
     }
 
     #[test]
+    fn layer_captures_call_site_stack_frames() {
+        let (sender, receiver) = mpsc::channel();
+        let layer = native::LogCaptureLayer {
+            sender,
+            capture_level: Level::ERROR,
+            excluded_targets: Vec::new(),
+            capture_stack_frames: true,
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: "game::combat", "traced failure");
+        });
+        let captured: Vec<native::CapturedLog> = receiver.try_iter().collect();
+        assert_eq!(captured.len(), 1);
+        let frames = &captured[0].frames;
+        assert!(!frames.is_empty(), "call-site frames must be captured");
+        for frame in frames {
+            let function = frame.function.as_deref().unwrap_or_default();
+            assert!(
+                !function.starts_with("tracing"),
+                "dispatch machinery must be filtered: {function}"
+            );
+        }
+    }
+
+    #[test]
+    fn layer_frame_capture_can_be_disabled() {
+        let (sender, receiver) = mpsc::channel();
+        let layer = native::LogCaptureLayer {
+            sender,
+            capture_level: Level::ERROR,
+            excluded_targets: Vec::new(),
+            capture_stack_frames: false,
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::error!(target: "game::combat", "untraced failure");
+        });
+        let captured: Vec<native::CapturedLog> = receiver.try_iter().collect();
+        assert_eq!(captured.len(), 1);
+        assert!(
+            captured[0].frames.is_empty(),
+            "disabled capture must not collect frames"
+        );
+    }
+
+    #[test]
+    fn process_captured_attaches_frames_to_the_error_info() {
+        let directory = tempfile::tempdir().unwrap();
+        let client = Client::builder("http://127.0.0.1:1/events")
+            .spool(directory.path(), 1024 * 1024)
+            .request_timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        let config = ReportConfig::default();
+        let mut state = native::ThrottleState::default();
+        let logs = std::iter::once(native::CapturedLog {
+            message: "spooled with frames".into(),
+            target: "game::system".into(),
+            level: Level::ERROR,
+            frames: vec![StackFrame {
+                function: Some("game::system::tick".into()),
+                filename: Some("src/game.rs".into()),
+                line: Some(42),
+                ..StackFrame::default()
+            }],
+        });
+        let runtime_client: native::RuntimeClient = client.clone().into();
+        native::process_captured(&runtime_client, &config, &mut state, logs);
+        let _ = client.flush(Duration::from_secs(2));
+        let spooled = read_spooled_events(directory.path());
+        assert_eq!(spooled.len(), 1);
+        let error = spooled[0]
+            .get("error")
+            .expect("log events carry error info")
+            .get("stack_frames")
+            .and_then(serde_json::Value::as_array)
+            .expect("frames attached to the error info");
+        assert_eq!(error.len(), 1);
+        assert_eq!(
+            error[0].get("function").and_then(serde_json::Value::as_str),
+            Some("game::system::tick")
+        );
+    }
+
+    #[test]
     fn capture_level_threshold_forwards_warnings_when_raised() {
         let (sender, receiver) = mpsc::channel();
         let layer = native::LogCaptureLayer {
             sender,
             capture_level: Level::WARN,
             excluded_targets: Vec::new(),
+            capture_stack_frames: false,
         };
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
@@ -774,6 +899,7 @@ mod tests {
             sender,
             capture_level: Level::ERROR,
             excluded_targets: Vec::new(),
+            capture_stack_frames: false,
         };
         let subscriber = tracing_subscriber::registry().with(layer);
         tracing::subscriber::with_default(subscriber, || {
@@ -789,7 +915,22 @@ mod tests {
             message: format!("failure {index}"),
             target: "game::system".into(),
             level: Level::ERROR,
+            frames: Vec::new(),
         })
+    }
+
+    /// Deserializes every spooled event payload in `directory`.
+    fn read_spooled_events(directory: &std::path::Path) -> Vec<serde_json::Value> {
+        let mut events = Vec::new();
+        for entry in std::fs::read_dir(directory).expect("spool dir readable") {
+            let path = entry.expect("entry readable").path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                continue;
+            }
+            let bytes = std::fs::read(&path).expect("spool file readable");
+            events.push(serde_json::from_slice(&bytes).expect("spooled event parses"));
+        }
+        events
     }
 
     #[test]
@@ -814,5 +955,13 @@ mod tests {
         // ends up in the spool; flush forces the worker to finish the queue.
         let report = client.flush(Duration::from_secs(2)).unwrap();
         assert_eq!(report.remaining, 1, "captured log event must be spooled");
+        let spooled = read_spooled_events(directory.path());
+        assert_eq!(spooled.len(), 1);
+        let error = spooled[0].get("error").expect("error info present");
+        let frames = error
+            .get("stack_frames")
+            .and_then(serde_json::Value::as_array)
+            .expect("log events capture call-site stack frames by default");
+        assert!(!frames.is_empty(), "frames must survive the whole pipeline");
     }
 }
