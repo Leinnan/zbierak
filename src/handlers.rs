@@ -182,6 +182,17 @@ struct CommentRow {
     body: String,
     display_name: String,
     created_at: i64,
+    /// Author; the ownership anchor for edit and delete authorization.
+    user_id: i64,
+    /// Set once the comment has been removed; the row becomes a tombstone.
+    deleted_at: Option<i64>,
+    /// Last accepted edit, if any.
+    updated_at: Option<i64>,
+    updated_by_name: Option<String>,
+    /// Sanitized HTML rendered server-side from the Markdown body; empty
+    /// for tombstones. Rendered after loading, never stored.
+    #[sqlx(skip)]
+    body_html: String,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -239,6 +250,36 @@ pub struct IssueJson {
 #[derive(Serialize)]
 pub struct TagsResponse {
     tags: Vec<String>,
+}
+
+/// Comment as exposed by the management API. `body` is the raw Markdown
+/// source (the same text an edit request accepts); it is `null` for
+/// tombstones, i.e. comments whose `deleted_at` is set.
+#[cfg_attr(feature = "docs", derive(utoipa::ToSchema))]
+#[derive(Debug, Serialize, FromRow)]
+pub struct CommentJson {
+    id: i64,
+    /// Author display name.
+    author: String,
+    /// Author id; ownership anchor for edit and delete authorization.
+    user_id: i64,
+    /// Raw Markdown body, `null` for tombstones.
+    body: Option<String>,
+    /// Unix timestamp of creation.
+    created_at: i64,
+    /// Unix timestamp of the last accepted edit, if any.
+    updated_at: Option<i64>,
+    /// Display name of the last editor (author, or the moderating admin).
+    updated_by: Option<String>,
+    /// Unix timestamp of removal; set rows are tombstones.
+    deleted_at: Option<i64>,
+}
+
+#[cfg_attr(feature = "docs", derive(utoipa::ToSchema))]
+#[derive(Deserialize)]
+pub struct CommentPayload {
+    /// Raw Markdown body of the comment, 1-10,000 characters.
+    pub body: String,
 }
 
 #[derive(Debug, Serialize, FromRow)]
@@ -707,6 +748,9 @@ struct IssueDetails {
     activity: Vec<ActivityRow>,
 }
 
+// Loading an issue fans out into fixed queries and view shaping; splitting
+// it would hide the single-pass structure of the page load.
+#[allow(clippy::too_many_lines)]
 async fn load_issue_details(
     state: &AppState,
     user_id: i64,
@@ -748,13 +792,26 @@ async fn load_issue_details(
         .zip(payloads.iter())
         .map(|(row, payload)| event_view(row, payload))
         .collect();
-    let comments = sqlx::query_as::<_, CommentRow>(
-        "SELECT c.id, c.body, u.display_name, c.created_at FROM issue_comments c
-         JOIN users u ON u.id=c.user_id WHERE c.issue_id=? ORDER BY c.created_at",
+    let mut comments = sqlx::query_as::<_, CommentRow>(
+        "SELECT c.id, c.body, c.user_id, c.created_at, c.deleted_at, c.updated_at,
+                u.display_name, ub.display_name AS updated_by_name
+         FROM issue_comments c
+         JOIN users u ON u.id=c.user_id
+         LEFT JOIN users ub ON ub.id=c.updated_by
+         WHERE c.issue_id=? ORDER BY c.created_at, c.id",
     )
     .bind(issue_id)
     .fetch_all(&state.db)
     .await?;
+    // Rendering and sanitization happen on the server so templates can embed
+    // the result with autoescaping disabled; tombstones stay unrendered.
+    for comment in &mut comments {
+        comment.body_html = if comment.deleted_at.is_some() {
+            String::new()
+        } else {
+            crate::markdown::render_markdown(&comment.body)
+        };
+    }
     let activity = sqlx::query_as::<_, ActivityRow>(
         "SELECT a.id, a.kind, a.details_json, u.display_name, a.created_at
          FROM issue_activity a LEFT JOIN users u ON u.id=a.user_id
@@ -1076,15 +1133,118 @@ pub async fn add_comment(
     UiForm(form): UiForm<CommentForm>,
 ) -> AppResult<Redirect> {
     auth::check_csrf(&session, &form.csrf_token)?;
-    let project_id =
-        auth::require_project_role(&state, session.user.id, &slug, ProjectRole::Developer).await?;
     let body = required_text("comment", &form.body, 10_000)?;
+    insert_comment_in_project(&state, session.user.id, &slug, issue_id, body).await?;
+    Ok(Redirect::to(&format!("/projects/{slug}/issues/{issue_id}")))
+}
+
+pub async fn edit_comment_form(
+    State(state): State<AppState>,
+    UiSession { session, .. }: UiSession,
+    AxumPath((slug, issue_id, comment_id)): AxumPath<(String, i64, i64)>,
+    UiForm(form): UiForm<CommentForm>,
+) -> AppResult<Redirect> {
+    auth::check_csrf(&session, &form.csrf_token)?;
+    let body = required_text("comment", &form.body, 10_000)?;
+    update_comment_in_project(&state, session.user.id, &slug, issue_id, comment_id, body).await?;
+    Ok(Redirect::to(&format!("/projects/{slug}/issues/{issue_id}")))
+}
+
+pub async fn delete_comment_form(
+    State(state): State<AppState>,
+    UiSession { session, .. }: UiSession,
+    AxumPath((slug, issue_id, comment_id)): AxumPath<(String, i64, i64)>,
+    UiForm(form): UiForm<CsrfForm>,
+) -> AppResult<Redirect> {
+    auth::check_csrf(&session, &form.csrf_token)?;
+    delete_comment_in_project(&state, session.user.id, &slug, issue_id, comment_id).await?;
+    Ok(Redirect::to(&format!("/projects/{slug}/issues/{issue_id}")))
+}
+
+/// Authorization for comment edits and removals: authors may always modify
+/// their own comment, and project admins and owners may moderate any
+/// comment in their project. Callers enforce the developer floor through
+/// [`auth::require_project_role`].
+fn can_modify_comment(role: ProjectRole, actor_id: i64, author_id: i64) -> bool {
+    actor_id == author_id || role >= ProjectRole::Admin
+}
+
+/// Comment body validation for API callers: unlike the HTML surface, which
+/// answers with `400`, the JSON API classifies rejected bodies as
+/// unprocessable content on the named field.
+fn validate_comment_body(raw: &str) -> Result<String, AppError> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 10_000 {
+        return Err(AppError::Unprocessable {
+            field: Some("body".into()),
+            message: "comment must contain 1 to 10,000 characters".into(),
+        });
+    }
+    Ok(trimmed.to_owned())
+}
+
+/// Loads a comment scoped through its issue and project, returning
+/// `(author_id, deleted_at)`; a missing row anywhere along the chain is a
+/// `404` so cross-project access never reveals existence.
+async fn load_comment_access<'e, E>(
+    executor: E,
+    project_id: i64,
+    issue_id: i64,
+    comment_id: i64,
+) -> AppResult<(i64, Option<i64>)>
+where
+    E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+{
+    sqlx::query_as::<_, (i64, Option<i64>)>(
+        "SELECT c.user_id, c.deleted_at FROM issue_comments c
+         JOIN issues i ON i.id=c.issue_id
+         WHERE c.id=? AND c.issue_id=? AND i.project_id=?",
+    )
+    .bind(comment_id)
+    .bind(issue_id)
+    .bind(project_id)
+    .fetch_optional(executor)
+    .await?
+    .ok_or(AppError::NotFound)
+}
+
+/// The actor's exact project role, used after the developer-floor check so
+/// the author-or-admin policy can be applied. Membership existence is
+/// already guaranteed by [`auth::require_project_role`]; stored unknown
+/// roles fail closed.
+async fn actor_role_in_project(
+    executor: impl sqlx::Executor<'_, Database = sqlx::Sqlite>,
+    project_id: i64,
+    user_id: i64,
+) -> AppResult<ProjectRole> {
+    let role: String =
+        sqlx::query_scalar("SELECT role FROM project_memberships WHERE project_id=? AND user_id=?")
+            .bind(project_id)
+            .bind(user_id)
+            .fetch_one(executor)
+            .await?;
+    ProjectRole::parse(&role).ok_or(AppError::Forbidden)
+}
+
+/// Shared implementation behind the browser form and the API create:
+/// inserts the comment only when the issue belongs to the authorized
+/// project, then records the timeline entry in the same transaction.
+/// The caller is responsible for validating the body.
+async fn insert_comment_in_project(
+    state: &AppState,
+    user_id: i64,
+    slug: &str,
+    issue_id: i64,
+    body: &str,
+) -> AppResult<i64> {
+    let project_id =
+        auth::require_project_role(state, user_id, slug, ProjectRole::Developer).await?;
     let mut tx = state.db.begin().await?;
     let result = sqlx::query(
         "INSERT INTO issue_comments (issue_id, user_id, body)
          SELECT id, ?, ? FROM issues WHERE id=? AND project_id=?",
     )
-    .bind(session.user.id)
+    .bind(user_id)
     .bind(body)
     .bind(issue_id)
     .bind(project_id)
@@ -1093,17 +1253,115 @@ pub async fn add_comment(
     if result.rows_affected() == 0 {
         return Err(AppError::NotFound);
     }
+    let comment_id = result.last_insert_rowid();
     sqlx::query(
         "INSERT INTO issue_activity (issue_id, user_id, kind, details_json)
          VALUES (?, ?, 'comment', ?)",
     )
     .bind(issue_id)
-    .bind(session.user.id)
-    .bind(json!({ "body": body }).to_string())
+    .bind(user_id)
+    .bind(json!({ "comment_id": comment_id, "body": body }).to_string())
     .execute(&mut *tx)
     .await?;
     tx.commit().await?;
-    Ok(Redirect::to(&format!("/projects/{slug}/issues/{issue_id}")))
+    Ok(comment_id)
+}
+
+/// Shared implementation behind the browser form and the API update:
+/// enforces the author-or-admin policy and writes the new body with edit
+/// attribution plus the timeline entry in one transaction. The caller is
+/// responsible for validating the body.
+async fn update_comment_in_project(
+    state: &AppState,
+    user_id: i64,
+    slug: &str,
+    issue_id: i64,
+    comment_id: i64,
+    body: &str,
+) -> AppResult<()> {
+    let project_id =
+        auth::require_project_role(state, user_id, slug, ProjectRole::Developer).await?;
+    let mut tx = state.db.begin().await?;
+    let (author_id, deleted_at) =
+        load_comment_access(&mut *tx, project_id, issue_id, comment_id).await?;
+    if deleted_at.is_some() {
+        // Tombstones are immutable; there is no restore flow.
+        return Err(AppError::NotFound);
+    }
+    let role = actor_role_in_project(&mut *tx, project_id, user_id).await?;
+    if !can_modify_comment(role, user_id, author_id) {
+        return Err(AppError::Forbidden);
+    }
+    let result = sqlx::query(
+        "UPDATE issue_comments SET body=?, updated_at=unixepoch(), updated_by=?
+         WHERE id=? AND deleted_at IS NULL",
+    )
+    .bind(body)
+    .bind(user_id)
+    .bind(comment_id)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    sqlx::query(
+        "INSERT INTO issue_activity (issue_id, user_id, kind, details_json)
+         VALUES (?, ?, 'comment_edited', ?)",
+    )
+    .bind(issue_id)
+    .bind(user_id)
+    .bind(json!({ "comment_id": comment_id }).to_string())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
+}
+
+/// Shared implementation behind the browser form and the API delete:
+/// soft-deletes the comment (a tombstone) after enforcing the
+/// author-or-admin policy, recording the timeline entry in the same
+/// transaction.
+async fn delete_comment_in_project(
+    state: &AppState,
+    user_id: i64,
+    slug: &str,
+    issue_id: i64,
+    comment_id: i64,
+) -> AppResult<()> {
+    let project_id =
+        auth::require_project_role(state, user_id, slug, ProjectRole::Developer).await?;
+    let mut tx = state.db.begin().await?;
+    let (author_id, deleted_at) =
+        load_comment_access(&mut *tx, project_id, issue_id, comment_id).await?;
+    if deleted_at.is_some() {
+        return Err(AppError::NotFound);
+    }
+    let role = actor_role_in_project(&mut *tx, project_id, user_id).await?;
+    if !can_modify_comment(role, user_id, author_id) {
+        return Err(AppError::Forbidden);
+    }
+    let result = sqlx::query(
+        "UPDATE issue_comments SET deleted_at=unixepoch(), updated_by=?
+         WHERE id=? AND deleted_at IS NULL",
+    )
+    .bind(user_id)
+    .bind(comment_id)
+    .execute(&mut *tx)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(AppError::NotFound);
+    }
+    sqlx::query(
+        "INSERT INTO issue_activity (issue_id, user_id, kind, details_json)
+         VALUES (?, ?, 'comment_deleted', ?)",
+    )
+    .bind(issue_id)
+    .bind(user_id)
+    .bind(json!({ "comment_id": comment_id }).to_string())
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    Ok(())
 }
 
 pub async fn update_issue_tags_form(
@@ -1777,6 +2035,166 @@ pub async fn update_issue_tags(
     Ok(Json(TagsResponse { tags }))
 }
 
+/// Loads one comment as its API representation, blanking the body of
+/// tombstones so removed content never leaves the database.
+async fn fetch_comment_json(db: &sqlx::SqlitePool, comment_id: i64) -> AppResult<CommentJson> {
+    let mut comment = sqlx::query_as::<_, CommentJson>(
+        "SELECT c.id, c.user_id, c.body, c.created_at, c.updated_at, c.deleted_at,
+                u.display_name AS author, ub.display_name AS updated_by
+         FROM issue_comments c
+         JOIN users u ON u.id=c.user_id
+         LEFT JOIN users ub ON ub.id=c.updated_by
+         WHERE c.id=?",
+    )
+    .bind(comment_id)
+    .fetch_optional(db)
+    .await?
+    .ok_or(AppError::NotFound)?;
+    if comment.deleted_at.is_some() {
+        comment.body = None;
+    }
+    Ok(comment)
+}
+
+#[cfg_attr(feature = "docs", utoipa::path(
+    get,
+    path = "/api/v1/projects/{slug}/issues/{issue_id}/comments",
+    tag = "comments",
+    operation_id = "listComments",
+    params(
+        ("slug" = String, Path, description = "Project slug"),
+        ("issue_id" = i64, Path, description = "Issue identifier"),
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Comments in chronological order, including tombstones", body = [CommentJson]),
+        (status = 401, description = "Missing or invalid API token", body = ApiErrorResponse),
+        (status = 404, description = "Unknown project, issue, or no membership", body = ApiErrorResponse),
+    )
+))]
+pub async fn list_comments(
+    State(state): State<AppState>,
+    ApiPath((slug, issue_id)): ApiPath<(String, i64)>,
+    ApiPrincipal { user_id }: ApiPrincipal,
+) -> Result<Json<Vec<CommentJson>>, ApiError> {
+    let project_id =
+        auth::require_project_role(&state, user_id, &slug, ProjectRole::Viewer).await?;
+    sqlx::query_scalar::<_, i64>("SELECT id FROM issues WHERE id=? AND project_id=?")
+        .bind(issue_id)
+        .bind(project_id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let mut comments = sqlx::query_as::<_, CommentJson>(
+        "SELECT c.id, c.user_id, c.body, c.created_at, c.updated_at, c.deleted_at,
+                u.display_name AS author, ub.display_name AS updated_by
+         FROM issue_comments c
+         JOIN users u ON u.id=c.user_id
+         LEFT JOIN users ub ON ub.id=c.updated_by
+         WHERE c.issue_id=? ORDER BY c.created_at, c.id",
+    )
+    .bind(issue_id)
+    .fetch_all(&state.db)
+    .await?;
+    for comment in &mut comments {
+        if comment.deleted_at.is_some() {
+            comment.body = None;
+        }
+    }
+    Ok(Json(comments))
+}
+
+#[cfg_attr(feature = "docs", utoipa::path(
+    post,
+    path = "/api/v1/projects/{slug}/issues/{issue_id}/comments",
+    tag = "comments",
+    operation_id = "createComment",
+    params(
+        ("slug" = String, Path, description = "Project slug"),
+        ("issue_id" = i64, Path, description = "Issue identifier"),
+    ),
+    request_body = CommentPayload,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 201, description = "Comment stored", body = CommentJson),
+        (status = 401, description = "Missing or invalid API token", body = ApiErrorResponse),
+        (status = 403, description = "Token owner is only a viewer on this project", body = ApiErrorResponse),
+        (status = 404, description = "Unknown project, issue, or no membership", body = ApiErrorResponse),
+        (status = 422, description = "Body failed validation", body = ApiErrorResponse),
+    )
+))]
+pub async fn create_comment(
+    State(state): State<AppState>,
+    ApiPath((slug, issue_id)): ApiPath<(String, i64)>,
+    ApiPrincipal { user_id }: ApiPrincipal,
+    ApiJson(payload): ApiJson<CommentPayload>,
+) -> Result<(StatusCode, Json<CommentJson>), ApiError> {
+    let body = validate_comment_body(&payload.body).map_err(ApiError)?;
+    let comment_id = insert_comment_in_project(&state, user_id, &slug, issue_id, &body).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(fetch_comment_json(&state.db, comment_id).await?),
+    ))
+}
+
+#[cfg_attr(feature = "docs", utoipa::path(
+    put,
+    path = "/api/v1/projects/{slug}/issues/{issue_id}/comments/{comment_id}",
+    tag = "comments",
+    operation_id = "updateComment",
+    params(
+        ("slug" = String, Path, description = "Project slug"),
+        ("issue_id" = i64, Path, description = "Issue identifier"),
+        ("comment_id" = i64, Path, description = "Comment identifier"),
+    ),
+    request_body = CommentPayload,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Comment updated", body = CommentJson),
+        (status = 401, description = "Missing or invalid API token", body = ApiErrorResponse),
+        (status = 403, description = "Token owner is neither the author nor a project admin", body = ApiErrorResponse),
+        (status = 404, description = "Unknown comment, issue, project, or no membership", body = ApiErrorResponse),
+        (status = 422, description = "Body failed validation", body = ApiErrorResponse),
+    )
+))]
+pub async fn update_comment(
+    State(state): State<AppState>,
+    ApiPath((slug, issue_id, comment_id)): ApiPath<(String, i64, i64)>,
+    ApiPrincipal { user_id }: ApiPrincipal,
+    ApiJson(payload): ApiJson<CommentPayload>,
+) -> Result<Json<CommentJson>, ApiError> {
+    let body = validate_comment_body(&payload.body).map_err(ApiError)?;
+    update_comment_in_project(&state, user_id, &slug, issue_id, comment_id, &body).await?;
+    Ok(Json(fetch_comment_json(&state.db, comment_id).await?))
+}
+
+#[cfg_attr(feature = "docs", utoipa::path(
+    delete,
+    path = "/api/v1/projects/{slug}/issues/{issue_id}/comments/{comment_id}",
+    tag = "comments",
+    operation_id = "deleteComment",
+    params(
+        ("slug" = String, Path, description = "Project slug"),
+        ("issue_id" = i64, Path, description = "Issue identifier"),
+        ("comment_id" = i64, Path, description = "Comment identifier"),
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 204, description = "Comment removed; a tombstone remains"),
+        (status = 401, description = "Missing or invalid API token", body = ApiErrorResponse),
+        (status = 403, description = "Token owner is neither the author nor a project admin", body = ApiErrorResponse),
+        (status = 404, description = "Unknown or already removed comment, issue, project, or no membership", body = ApiErrorResponse),
+    )
+))]
+pub async fn delete_comment(
+    State(state): State<AppState>,
+    ApiPath((slug, issue_id, comment_id)): ApiPath<(String, i64, i64)>,
+    ApiPrincipal { user_id }: ApiPrincipal,
+) -> Result<StatusCode, ApiError> {
+    delete_comment_in_project(&state, user_id, &slug, issue_id, comment_id).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 #[cfg_attr(feature = "docs", utoipa::path(
     get,
     path = "/health",
@@ -2085,7 +2503,21 @@ fn issue_markdown(details: &IssueDetails) -> String {
                 comment.display_name,
                 format_unix(comment.created_at)
             );
-            let _ = writeln!(out, "{}\n", comment.body);
+            if comment.deleted_at.is_some() {
+                let _ = writeln!(out, "_Comment removed._\n");
+            } else {
+                if comment.updated_at.is_some() {
+                    match comment.updated_by_name.as_deref() {
+                        Some(editor) => {
+                            let _ = writeln!(out, "_edited by {editor}_");
+                        }
+                        None => {
+                            let _ = writeln!(out, "_edited_");
+                        }
+                    }
+                }
+                let _ = writeln!(out, "{}\n", comment.body);
+            }
         }
     }
 
@@ -2217,6 +2649,11 @@ mod tests {
                 body: "Investigated on staging.".into(),
                 display_name: "Alice".into(),
                 created_at: 0,
+                user_id: 1,
+                deleted_at: None,
+                updated_at: None,
+                updated_by_name: None,
+                body_html: String::new(),
             }],
             activity: vec![ActivityRow {
                 id: 1,
@@ -2288,6 +2725,43 @@ mod tests {
         assert!(!markdown.contains("## Recent events"));
         assert!(!markdown.contains("## Comments"));
         assert!(!markdown.contains("## Activity"));
+    }
+
+    #[test]
+    fn markdown_exports_tombstones_instead_of_removed_bodies() {
+        let mut value = details(issue_value(), Vec::new());
+        value.comments = vec![
+            CommentRow {
+                id: 1,
+                body: "secret note".into(),
+                display_name: "Alice".into(),
+                created_at: 0,
+                user_id: 1,
+                deleted_at: Some(60),
+                updated_at: None,
+                updated_by_name: Some("Bob".into()),
+                body_html: String::new(),
+            },
+            CommentRow {
+                id: 2,
+                body: "kept".into(),
+                display_name: "Alice".into(),
+                created_at: 120,
+                user_id: 1,
+                deleted_at: None,
+                updated_at: Some(180),
+                updated_by_name: Some("Bob".into()),
+                body_html: String::new(),
+            },
+        ];
+        let markdown = issue_markdown(&value);
+
+        assert!(markdown.contains("### Alice — 1970-01-01T00:00:00Z"));
+        assert!(markdown.contains("_Comment removed._"));
+        assert!(!markdown.contains("secret note"));
+        assert!(markdown.contains("### Alice — 1970-01-01T00:02:00Z"));
+        assert!(markdown.contains("_edited by Bob_"));
+        assert!(markdown.contains("kept"));
     }
 
     #[test]

@@ -91,6 +91,10 @@ are `owner`, `admin`, `developer`, and `viewer`. Owners and admins can create
 ingestion keys, configure notification endpoints, and add or update members;
 only owners can assign or modify owner/admin-level membership. Developers can
 change issue status and comment, while viewers have read-only issue access.
+Comments are written in Markdown (EasyMDE editor in the browser, plain
+`textarea` fallback), rendered server-side through a sanitizer, and can be
+edited or removed by their author; project admins and owners can also edit and
+remove any comment in their project. Removed comments become tombstones.
 Creating a previously unknown member also creates that user's password login. A
 new ingestion key is shown once; only its SHA-256 hash and prefix are stored.
 
@@ -211,11 +215,39 @@ curl --fail-with-body -X PUT \
   'http://127.0.0.1:3000/api/v1/projects/storefront/issues/1/tags'
 ```
 
+Read, create, edit, and remove comments (bodies are Markdown, 1–10,000
+characters; creation requires `developer`, and editing or removing requires
+being the comment's author or a project `admin`/`owner`):
+
+```sh
+curl --fail-with-body \
+  -H 'Authorization: Bearer zpat_REPLACE_WITH_API_TOKEN' \
+  'http://127.0.0.1:3000/api/v1/projects/storefront/issues/1/comments'
+
+curl --fail-with-body -X POST \
+  -H 'Authorization: Bearer zpat_REPLACE_WITH_API_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"body": "Reproduced on staging, see `stack_frames`."}' \
+  'http://127.0.0.1:3000/api/v1/projects/storefront/issues/1/comments'
+
+curl --fail-with-body -X PUT \
+  -H 'Authorization: Bearer zpat_REPLACE_WITH_API_TOKEN' \
+  -H 'Content-Type: application/json' \
+  -d '{"body": "Reproduced on staging **and** production."}' \
+  'http://127.0.0.1:3000/api/v1/projects/storefront/issues/1/comments/1'
+
+curl --fail-with-body -X DELETE \
+  -H 'Authorization: Bearer zpat_REPLACE_WITH_API_TOKEN' \
+  'http://127.0.0.1:3000/api/v1/projects/storefront/issues/1/comments/1'
+```
+
 List responses return issues ordered by most recent activity with a `tags`
 array per issue. Tag edits return the stored (sorted) set. Errors use the same
 JSON shape as ingestion, with `401` for a missing, invalid, or revoked token,
 `404` for unknown projects or issues outside your memberships, `403` when the
-token owner is only a viewer, and `422` when tags fail validation.
+token owner is only a viewer, and `422` when tags fail validation. Deleted
+comments stay in listings as tombstones (`deleted_at` set, `body` `null`);
+removing an already-removed comment returns `404`.
 
 ## Rust SDK
 
@@ -324,7 +356,8 @@ requests.
 - The Compose service runs as UID/GID `10001`, drops Linux capabilities, prevents
   privilege escalation, uses a read-only root filesystem, and writes only to
   `/data` and `/tmp`.
-- Review and update Rust, Debian, Tabler, and htmx dependencies regularly.
+- Review and update Rust, Debian, Tabler, htmx, and EasyMDE dependencies
+  regularly.
 
 ## Backup And Restore
 

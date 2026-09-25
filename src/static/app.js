@@ -58,6 +58,79 @@
     });
   }
 
+  // Toolbar actions that stay available; icons are rendered from CSS glyph
+  // classes so no Font Awesome download is attempted (the CSP allows
+  // same-origin resources only).
+  var EDITOR_TOOLBAR = [
+    "bold", "italic", "strikethrough", "|",
+    "heading", "code", "quote", "|",
+    "unordered-list", "ordered-list", "|",
+    "link", "|", "preview", "side-by-side", "fullscreen"
+  ];
+  var EDITOR_ICONS = {
+    bold: "zb-icon-bold",
+    italic: "zb-icon-italic",
+    strikethrough: "zb-icon-strike",
+    heading: "zb-icon-heading",
+    code: "zb-icon-code",
+    quote: "zb-icon-quote",
+    "unordered-list": "zb-icon-ul",
+    "ordered-list": "zb-icon-ol",
+    link: "zb-icon-link",
+    preview: "zb-icon-preview",
+    "side-by-side": "zb-icon-side",
+    fullscreen: "zb-icon-full"
+  };
+
+  // The editor's live preview runs in the browser, one step removed from the
+  // server-side sanitizer, so strip the obvious vectors there as well.
+  // DOMParser documents never execute scripts or fetch subresources.
+  function stripPreviewHtml(html) {
+    var doc = new DOMParser().parseFromString(html, "text/html");
+    doc.querySelectorAll(
+      "script, iframe, object, embed, style, link, meta, base, form, input, button, textarea, select, audio, video, source, track, frame, frameset, applet, svg, math"
+    ).forEach(function (element) { element.remove(); });
+    doc.querySelectorAll("*").forEach(function (element) {
+      Array.prototype.slice.call(element.attributes).forEach(function (attribute) {
+        var name = attribute.name.toLowerCase();
+        var value = attribute.value.trim().toLowerCase().replace(/\s+/g, "");
+        var urlBearer = name === "href" || name === "src" || name === "xlink:href";
+        var dangerous = name.indexOf("on") === 0 || name === "style" || name === "id"
+          || (urlBearer && (value.indexOf("javascript:") === 0 || value.indexOf("data:") === 0));
+        if (dangerous) element.removeAttribute(attribute.name);
+      });
+    });
+    return doc.body.innerHTML;
+  }
+
+  function setupMarkdownEditors(root) {
+    if (!window.EasyMDE) return;
+    root.querySelectorAll("textarea[data-markdown-editor]:not([data-prepared])").forEach(function (textarea) {
+      textarea.dataset.prepared = "true";
+      var iconMap = {};
+      Object.keys(EDITOR_ICONS).forEach(function (name) {
+        iconMap[name] = "zb-icon " + EDITOR_ICONS[name];
+      });
+      try {
+        new window.EasyMDE({
+          element: textarea,
+          autoDownloadFontAwesome: false,
+          spellChecker: false,
+          uploadImage: false,
+          minHeight: "160px",
+          placeholder: textarea.getAttribute("placeholder") || "",
+          status: ["lines", "words"],
+          toolbar: EDITOR_TOOLBAR,
+          iconClassMap: iconMap,
+          renderingConfig: { sanitizerFunction: stripPreviewHtml }
+        });
+      } catch (_) {
+        // If the editor cannot start, the plain textarea still works and
+        // submits valid Markdown, so no fallback handling is needed.
+      }
+    });
+  }
+
   function showCopyFeedback(button) {
     var original = button.textContent;
     button.textContent = "Copied";
@@ -73,6 +146,7 @@
     localizeTimes(root);
     formatJson(root);
     syncThemeControls(root);
+    setupMarkdownEditors(root);
   }
 
   document.addEventListener("DOMContentLoaded", function () {

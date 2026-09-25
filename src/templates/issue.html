@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% import "fragments/ui.html" as ui %}
 {% block title %}{{ issue.title }} · {{ slug }}{% endblock title %}
+{% block head %}<link rel="stylesheet" href="/static/vendor/easymde/easymde.min.css">{% endblock head %}
 {% block content %}
 <nav class="breadcrumb-line" aria-label="Breadcrumb"><a href="/projects">Projects</a><span>/</span><a href="/projects/{{ slug }}">{{ project.name }}</a><span>/</span><span aria-current="page">Issue {{ issue.id }}</span></nav>
 
@@ -43,9 +44,30 @@
       <div class="section-heading"><div><p class="eyebrow">Investigation log</p><h2 id="comments-title">Comments</h2></div><span>{{ comments | default(value=[]) | length }}</span></div>
       <div class="comment-list">
         {% for comment in comments | default(value=[]) %}
-        <article class="card comment-card">
-          <div class="comment-meta"><span class="avatar avatar-sm">{{ comment.display_name | truncate(length=1, end="") | upper }}</span><div><strong>{{ comment.display_name }}</strong><time class="js-local-time" data-unix="{{ comment.created_at }}">{{ comment.created_at }}</time></div></div>
-          <p>{{ comment.body }}</p>
+        <article class="card comment-card{% if comment.deleted_at %} is-removed{% endif %}">
+          <div class="comment-meta"><span class="avatar avatar-sm">{{ comment.display_name | truncate(length=1, end="") | upper }}</span><div><strong>{{ comment.display_name }}</strong><time class="js-local-time" data-unix="{{ comment.created_at }}">{{ comment.created_at }}</time>{% if comment.updated_at %}<span class="comment-edited">edited{% if comment.updated_by_name %} by {{ comment.updated_by_name }}{% endif %}</span>{% endif %}</div></div>
+          {% if comment.deleted_at %}
+          <p class="comment-removed">Comment removed.</p>
+          {% else %}
+          <div class="comment-body markdown">{{ comment.body_html | safe }}</div>
+          {% if project.role != "viewer" and (comment.user_id == user.id or project.role == "admin" or project.role == "owner") %}
+          <div class="comment-actions">
+            <details class="comment-edit">
+              <summary>Edit</summary>
+              <form method="post" action="/projects/{{ slug }}/issues/{{ issue.id }}/comments/{{ comment.id }}/edit">
+                {{ ui::csrf(token=csrf_token) }}
+                <label class="visually-hidden" for="comment-edit-{{ comment.id }}">Edit comment</label>
+                <textarea class="form-control" id="comment-edit-{{ comment.id }}" name="body" rows="4" maxlength="10000" data-markdown-editor required>{{ comment.body }}</textarea>
+                <div class="comment-edit-actions"><button class="btn btn-primary btn-sm" type="submit">Save changes</button></div>
+              </form>
+            </details>
+            <form class="comment-delete" method="post" action="/projects/{{ slug }}/issues/{{ issue.id }}/comments/{{ comment.id }}/delete">
+              {{ ui::csrf(token=csrf_token) }}
+              <button class="btn btn-outline-danger btn-sm" type="submit" data-confirm="Remove this comment? The text will no longer be shown.">Delete</button>
+            </form>
+          </div>
+          {% endif %}
+          {% endif %}
         </article>
         {% else %}
         <p class="text-secondary">No comments yet. Record context or handoff notes below.</p>
@@ -55,7 +77,8 @@
         <div class="card-body">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label class="form-label" for="comment-body">Add a comment</label>
-          <textarea class="form-control" id="comment-body" name="body" rows="4" maxlength="10000" placeholder="What did you find?" required></textarea>
+          <textarea class="form-control" id="comment-body" name="body" rows="4" maxlength="10000" placeholder="Write in Markdown: **bold**, `code`, lists, links…" data-markdown-editor required></textarea>
+          <p class="form-hint">Markdown is supported and rendered for readers; raw HTML is removed.</p>
         </div>
         <div class="card-footer d-flex justify-content-end"><button class="btn btn-primary" type="submit">Post comment</button></div>
       </form>{% endif %}
@@ -87,3 +110,4 @@
   </aside>
 </div>
 {% endblock content %}
+{% block scripts %}<script src="/static/vendor/easymde/easymde.min.js" defer></script>{% endblock scripts %}

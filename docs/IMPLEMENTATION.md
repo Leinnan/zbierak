@@ -47,8 +47,11 @@ separates it from potential future work.
   protection, same-origin referrer policy, and a restrictive permissions policy.
 - Project roles are `owner`, `admin`, `developer`, and `viewer`, ordered by
   capability. Owners and admins manage keys, endpoints, and membership; only
-  owners can assign or modify owner/admin-level membership. Developers can change
-  issue status and comment. Viewers have read-only project and issue access.
+  owners can assign or modify owner/admin-level membership. Developers can
+  change issue status and comment. Viewers have read-only project and issue
+  access. Comment edits and removals additionally follow an author-or-admin
+  policy: authors manage their own comments, and owners/admins can moderate
+  any comment in their project.
 
 ### Projects And Issue Review
 
@@ -69,7 +72,15 @@ separates it from potential future work.
   reopen an ignored issue.
 - The UI lists up to 100 issues per project and the most recent 20 event rows per
   issue. It supports status values `unresolved`, `resolved`, and `ignored`, plus
-  comments up to 10,000 characters. The project page can filter the issue list
+  comments up to 10,000 characters. Comments are stored as raw Markdown and
+  rendered server-side with `pulldown-cmark`; the HTML is sanitized with
+  `ammonia` (scripts, event handlers, `javascript:`/`data:` URLs, styles, and
+  element ids stripped) before it is embedded in the issue page. The browser
+  uses a vendored EasyMDE editor with a plain-textarea fallback. Authors can
+  edit and remove their own comments, and project owners/admins can edit and
+  remove any comment in their project; edits are attributed (`updated_at`,
+  `updated_by`) and removals are soft deletes that leave a visible tombstone.
+  The project page can filter the issue list
   by tags via `?tag=a,b` (AND semantics) with an autocomplete over the
   project's distinct tags.
 - Issues carry flat string tags stored in the `issue_tags` table (one row per
@@ -80,12 +91,14 @@ separates it from potential future work.
   activity entry. The issue page offers a comma-separated tag editor for
   members with the developer role or above, and tags appear in the Markdown
   export.
-- Status changes and comments are recorded in an issue activity stream. An event
-  matching a resolved issue reopens it and records a system regression entry;
-  ignored issues are not automatically reopened.
+- Status changes, comments, comment edits (`comment_edited`), and comment
+  removals (`comment_deleted`) are recorded in an issue activity stream. An
+  event matching a resolved issue reopens it and records a system regression
+  entry; ignored issues are not automatically reopened.
 - Any issue can be exported as Markdown via
   `GET /projects/{slug}/issues/{issue_id}/export.md`, including title, status,
-  event metadata, and the full activity stream.
+  event metadata, comment bodies (removed comments export as a tombstone), and
+  the full activity stream.
 - Projects carry an `active`/`archived` status column reserved for future use;
   no archive flow exists yet.
 
@@ -122,6 +135,14 @@ separates it from potential future work.
   - `PUT /api/v1/projects/{slug}/issues/{issue_id}/tags` replaces the tag set
     (`{"tags": [...]}`), requires the developer role, and returns the stored
     set. Invalid tags fail with 422 `validation_failed` on the `tags` field.
+  - `GET /api/v1/projects/{slug}/issues/{issue_id}/comments` lists comments in
+    chronological order; `POST` to the same path creates one (`{"body": "…"}`
+    as Markdown, developer role required, 201 response). `PUT`/`DELETE` on
+    `/comments/{comment_id}` edit or soft-delete a comment; both require the
+    author or a project admin/owner with at least the developer role. Edited
+    comments return updated attribution, deleted ones remain as tombstones
+    with a `null` body, and removing or editing a tombstone returns 404.
+    Invalid bodies fail with 422 `validation_failed` on the `body` field.
 
 ### Rust SDK
 
@@ -177,8 +198,9 @@ separates it from potential future work.
 - Compose persists `/data`, publishes to loopback by default, uses a read-only
   root filesystem and writable `/tmp`, drops all capabilities, and prevents
   privilege escalation.
-- Tabler 1.4.0 and htmx 2.0.7 are vendored under `src/static/vendor`. The UI uses
-  local files only, and `src/static/THIRD_PARTY_NOTICES` carries their notices.
+- Tabler 1.4.0, htmx 2.0.7, and EasyMDE 2.21.0 are vendored under
+  `src/static/vendor`. The UI uses local files only, and
+  `src/static/THIRD_PARTY_NOTICES` carries their notices.
 - The justfile provides manual `backup` and `restore` recipes that archive and
   restore the data volume while the service is stopped.
 

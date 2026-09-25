@@ -20,6 +20,7 @@ mod error;
 pub mod extractors;
 mod fingerprint;
 mod handlers;
+mod markdown;
 mod net_policy;
 pub use net_policy::{BoxResolveFuture, Resolver, SystemResolver, is_allowed_destination};
 #[cfg(feature = "docs")]
@@ -105,6 +106,14 @@ fn ui_router() -> Router<AppState> {
             post(handlers::add_comment),
         )
         .route(
+            "/projects/{slug}/issues/{issue_id}/comments/{comment_id}/edit",
+            post(handlers::edit_comment_form),
+        )
+        .route(
+            "/projects/{slug}/issues/{issue_id}/comments/{comment_id}/delete",
+            post(handlers::delete_comment_form),
+        )
+        .route(
             "/projects/{slug}/issues/{issue_id}/resolve",
             post(handlers::resolve_issue),
         )
@@ -152,6 +161,18 @@ fn api_router() -> Router<AppState> {
         .route(
             "/projects/{slug}/issues/{issue_id}/tags",
             put(handlers::update_issue_tags).layer(DefaultBodyLimit::max(FORM_BODY_LIMIT)),
+        )
+        .route(
+            "/projects/{slug}/issues/{issue_id}/comments",
+            get(handlers::list_comments)
+                .post(handlers::create_comment)
+                .layer(DefaultBodyLimit::max(FORM_BODY_LIMIT)),
+        )
+        .route(
+            "/projects/{slug}/issues/{issue_id}/comments/{comment_id}",
+            put(handlers::update_comment)
+                .delete(handlers::delete_comment)
+                .layer(DefaultBodyLimit::max(FORM_BODY_LIMIT)),
         )
         .fallback(api_not_found)
         .method_not_allowed_fallback(api_method_not_allowed)

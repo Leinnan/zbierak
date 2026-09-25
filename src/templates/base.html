@@ -8,7 +8,7 @@
   <title>{% block title %}{{ title | default(value="Dashboard") }} · {{ app_name | default(value="Zbierak") }}{% endblock title %}</title>
   <script src="/static/theme-init.js"></script>
   <link rel="stylesheet" href="/static/vendor/tabler/tabler.min.css">
-  <link rel="stylesheet" href="/static/app.css?v=2">
+  <link rel="stylesheet" href="/static/app.css?v=3">
   {% block head %}{% endblock head %}
 </head>
 <body class="{{ body_class | default(value="") }}">
@@ -55,7 +55,7 @@
 {% endblock body %}
 <script src="/static/vendor/htmx/htmx.min.js" defer></script>
 <script src="/static/vendor/tabler/tabler.min.js" defer></script>
-<script src="/static/app.js?v=2" defer></script>
+<script src="/static/app.js?v=3" defer></script>
 {% block scripts %}{% endblock scripts %}
 </body>
 </html>
