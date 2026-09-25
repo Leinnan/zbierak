@@ -11,8 +11,15 @@ default = ["blocking"]
 blocking = ["reqwest/blocking"]
 # Asynchronous client backed by a spawned Tokio task.
 async = ["dep:tokio"]
+# Bevy integration: captures Bevy log events through `LogPlugin` and
+# provides wiring helpers (`bevy_log::LogPlugin::custom_layer`,
+# [`crate::bevy::ZbierakPlugin`]). Requires `blocking` or `async`.
+bevy = ["dep:bevy_app", "dep:bevy_ecs", "dep:bevy_log"]
 
 [dependencies]
+bevy_app = { version = "0.19", optional = true }
+bevy_ecs = { version = "0.19", optional = true }
+bevy_log = { version = "0.19", optional = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 serde_json = "1"
 thiserror = "2"

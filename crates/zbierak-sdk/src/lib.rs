@@ -11,6 +11,10 @@
 //! * `async`: [`AsyncClient`] sends on a spawned Tokio task; capture stays synchronous,
 //!   while `flush` and `shutdown` are awaited.
 //!
+//! With the `bevy` feature the crate additionally exposes a Bevy integration
+//! in the [`bevy`] module: it captures Bevy log events through `LogPlugin`,
+//! wires a drain system, and installs the panic hook from one call.
+//!
 //! The protocol types the API takes and returns are re-exported, so depending on this
 //! crate alone is enough to build and send events.
 //!
@@ -41,6 +45,8 @@
 
 #[cfg(feature = "async")]
 mod async_client;
+#[cfg(feature = "bevy")]
+pub mod bevy;
 #[cfg(feature = "blocking")]
 mod blocking;
 
