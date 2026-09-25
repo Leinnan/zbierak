@@ -2387,12 +2387,31 @@ pub async fn ingest(
         .execute(&mut *tx)
         .await?;
     if let Some(notification_kind) = notification_kind {
-        let notification = json!({
-            "content": format!("{} in {slug}: {title}", if notification_kind == "issue.created" { "New issue" } else { "Issue regressed" }),
+        let issue_url = state.config.public_url.as_ref().map(|base| {
+            let base = base.as_str().trim_end_matches('/');
+            format!("{base}/projects/{slug}/issues/{issue_id}")
+        });
+        let mut content = format!(
+            "{} in {slug}: {title}",
+            if notification_kind == "issue.created" {
+                "New issue"
+            } else {
+                "Issue regressed"
+            }
+        );
+        if let Some(link) = &issue_url {
+            content.push('\n');
+            content.push_str(link);
+        }
+        let mut notification = json!({
+            "content": content,
             "event": notification_kind, "project": slug, "issue_id": issue_id,
             "event_id": &producer_event_id, "fingerprint": &fingerprint, "title": &title,
-        })
-        .to_string();
+        });
+        if let Some(link) = &issue_url {
+            notification["issue_url"] = json!(link);
+        }
+        let notification = notification.to_string();
         sqlx::query(
             "INSERT INTO outbox (endpoint_id, event_type, payload_json)
              SELECT id, ?, ? FROM notification_endpoints

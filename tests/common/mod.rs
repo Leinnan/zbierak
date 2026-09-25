@@ -34,6 +34,7 @@ pub fn test_config() -> Config {
         static_dir: AssetSource::Embedded,
         template_dir: AssetSource::Embedded,
         webhook_key: None,
+        public_url: None,
     }
 }
 

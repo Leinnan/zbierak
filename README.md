@@ -138,6 +138,7 @@ Copy `.env.example` to `.env`. The container accepts these variables:
 | `ZBIERAK_SESSION_DAYS` | Session lifetime, from 1 through 365 days | `30` |
 | `ZBIERAK_STATIC_DIR` | Optional static asset directory override | embedded |
 | `ZBIERAK_TEMPLATE_DIR` | Optional Tera template directory override | embedded |
+| `ZBIERAK_PUBLIC_URL` | Optional absolute `http(s)` base URL of this deployment; notifications then link to the issue page | unset |
 | `RUST_LOG` | `tracing-subscriber` EnvFilter | `zbierak=info` |
 
 Set `ZBIERAK_COOKIE_SECURE=true` whenever users access Zbierak over HTTPS. The
@@ -394,7 +395,9 @@ issue regresses. The durable SQLite outbox is committed with the event, then a
 background worker posts JSON to enabled endpoints. Generic HTTP/HTTPS webhooks
 require a secret of at least 16 characters and receive an
 `x-zbierak-signature: sha256=<base64-hmac>` header. Discord endpoints must be
-HTTPS URLs hosted by `discord.com` or `discordapp.com`. Deliveries resolve the
+HTTPS URLs hosted by `discord.com` or `discordapp.com`. When
+`ZBIERAK_PUBLIC_URL` is set, notification payloads carry an `issue_url` field
+and the message text ends with a link to the issue page. Deliveries resolve the
 destination, pin the connection to public addresses only, and never follow
 redirects. Failed deliveries retry with exponential delays and remain pending
 until they succeed or the endpoint is deleted.

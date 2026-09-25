@@ -473,6 +473,7 @@ mod tests {
                 static_dir: AssetSource::Embedded,
                 template_dir: AssetSource::Embedded,
                 webhook_key: None,
+                public_url: None,
             }),
             db,
             templates: Arc::new(tera::Tera::default()),

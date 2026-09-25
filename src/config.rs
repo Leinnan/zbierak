@@ -4,6 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use url::Url;
+
 use crate::{AppError, AppResult};
 
 /// Where a class of runtime assets (templates, static files) is loaded from.
@@ -35,6 +37,9 @@ pub struct Config {
     pub template_dir: AssetSource,
     /// Master key encrypting webhook signing secrets at rest.
     pub webhook_key: Option<[u8; 32]>,
+    /// Public base URL used to build issue links in notifications
+    /// (`ZBIERAK_PUBLIC_URL`).
+    pub public_url: Option<Url>,
 }
 
 impl AssetSource {
@@ -90,6 +95,15 @@ impl Config {
                 )));
             }
         };
+        let public_url = match env::var("ZBIERAK_PUBLIC_URL") {
+            Ok(raw) => parse_public_url(Some(raw))?,
+            Err(env::VarError::NotPresent) => None,
+            Err(error) => {
+                return Err(AppError::Config(format!(
+                    "invalid ZBIERAK_PUBLIC_URL: {error}"
+                )));
+            }
+        };
         Ok(Self {
             bind,
             database_url,
@@ -98,6 +112,7 @@ impl Config {
             static_dir: resolve_asset_dir("ZBIERAK_STATIC_DIR"),
             template_dir: resolve_asset_dir("ZBIERAK_TEMPLATE_DIR"),
             webhook_key,
+            public_url,
         })
     }
 
@@ -106,7 +121,7 @@ impl Config {
     #[must_use]
     pub fn summary(&self) -> String {
         format!(
-            "version {}, listen {}, database {}, cookie_secure {}, session_days {}, templates: {}, static: {}, webhook_key: {}",
+            "version {}, listen {}, database {}, cookie_secure {}, session_days {}, templates: {}, static: {}, webhook_key: {}, public_url: {}",
             env!("CARGO_PKG_VERSION"),
             self.bind,
             self.database_url,
@@ -118,13 +133,32 @@ impl Config {
                 "present"
             } else {
                 "absent"
-            }
+            },
+            self.public_url
+                .as_ref()
+                .map_or_else(|| "unset".to_string(), ToString::to_string)
         )
     }
 }
 
 fn preferred_env(primary: &str, legacy: &str) -> Option<String> {
     env::var(primary).ok().or_else(|| env::var(legacy).ok())
+}
+
+/// Parses `ZBIERAK_PUBLIC_URL`: an optional absolute `http`/`https` base URL
+/// used to link issues in outgoing notifications.
+fn parse_public_url(value: Option<String>) -> AppResult<Option<Url>> {
+    let Some(raw) = value else {
+        return Ok(None);
+    };
+    let url = Url::parse(&raw)
+        .map_err(|error| AppError::Config(format!("invalid ZBIERAK_PUBLIC_URL: {error}")))?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(AppError::Config(
+            "ZBIERAK_PUBLIC_URL must be an absolute http(s) URL".into(),
+        ));
+    }
+    Ok(Some(url))
 }
 
 fn default_database_url() -> String {
@@ -191,7 +225,9 @@ mod tests {
 
     use std::net::SocketAddr;
 
-    use super::{AssetSource, Config, asset_source_for, normalize_database_url_for};
+    use super::{
+        AssetSource, Config, asset_source_for, normalize_database_url_for, parse_public_url,
+    };
 
     #[test]
     fn container_data_url_falls_back_without_data_dir() {
@@ -246,6 +282,7 @@ mod tests {
             static_dir: AssetSource::Embedded,
             template_dir: AssetSource::Embedded,
             webhook_key,
+            public_url: None,
         }
     }
 
@@ -260,6 +297,7 @@ mod tests {
             "templates: embedded",
             "static: embedded",
             "webhook_key: absent",
+            "public_url: unset",
         ] {
             assert!(
                 summary.contains(needle),
@@ -286,5 +324,34 @@ mod tests {
             AssetSource::Directory(std::path::PathBuf::from("/app/static")).describe(),
             "directory /app/static"
         );
+    }
+
+    #[test]
+    fn public_url_is_absent_when_unset() {
+        assert_eq!(parse_public_url(None).unwrap(), None);
+    }
+
+    #[test]
+    fn public_url_accepts_absolute_http_urls() {
+        for raw in [
+            "https://errors.example.com",
+            "https://errors.example.com/",
+            "http://localhost:3000",
+            "https://example.com/zbierak/",
+        ] {
+            let parsed = parse_public_url(Some(raw.into())).unwrap();
+            assert!(parsed.is_some(), "{raw} should parse");
+            assert!(
+                matches!(parsed.as_ref().unwrap().scheme(), "http" | "https"),
+                "{raw} should keep an http(s) scheme"
+            );
+        }
+    }
+
+    #[test]
+    fn public_url_rejects_unusable_values() {
+        for raw in ["not a url", "ftp://example.com", "mailto:ops@example.com"] {
+            assert!(parse_public_url(Some(raw.into())).is_err(), "{raw}");
+        }
     }
 }
