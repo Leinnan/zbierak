@@ -280,7 +280,7 @@ impl AsyncClient {
     /// frames, and returns its stable event ID.
     ///
     /// The error text becomes the event message, the concrete type and stack
-    /// fill [`ErrorInfo`], and `source()` causes land in the `error_chain`
+    /// fill [`crate::ErrorInfo`], and `source()` causes land in the `error_chain`
     /// context.
     ///
     /// # Errors
